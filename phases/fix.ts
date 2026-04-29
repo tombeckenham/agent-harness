@@ -9,6 +9,9 @@ import {
   commitsSince,
   ensureSafeAbort,
   ghPrComments,
+  pushBranch,
+  remoteSyncStatus,
+  runLefthookPreCommit,
   type CiCheck,
   type Repo,
 } from '../lib/git';
@@ -165,6 +168,48 @@ export async function runFixPhase(args: {
   const endSha = await commitsSince(issue.baseRef, issue.worktreePath);
   const added = endSha - startSha;
   phaseLog.info('fix.commits-added', { added });
-  // The fix prompt instructs Claude to push; we don't redundantly push here.
+
+  if (added === 0) {
+    // No commits = nothing to push, but also nothing to verify against
+    // CI feedback. Treat as a no-op fix; the next review round will decide.
+    return { ok: true, newCommits: 0, transcriptPath };
+  }
+
+  // Lefthook self-check before push.
+  const lefthook = await runLefthookPreCommit(issue.worktreePath);
+  if (lefthook.exitCode !== 0) {
+    phaseLog.warn('lefthook.failed', {
+      exitCode: lefthook.exitCode,
+      stderr: lefthook.stderr.slice(0, 2000),
+    });
+    return {
+      ok: false,
+      newCommits: added,
+      error: `Pre-push lefthook failed (exit ${lefthook.exitCode}).`,
+      transcriptPath,
+    };
+  }
+
+  // Verify the push happened. Claude may have forgotten or been killed.
+  const sync = await remoteSyncStatus(issue.branch, issue.worktreePath);
+  if (sync === 'ahead') {
+    phaseLog.warn('fix.push-missed-by-claude; pushing now');
+    await pushBranch(issue.branch, issue.worktreePath);
+  } else if (sync === 'diverged') {
+    return {
+      ok: false,
+      newCommits: added,
+      error: `Local and remote diverged on ${issue.branch}; refusing to force-push.`,
+      transcriptPath,
+    };
+  } else if (sync === 'behind') {
+    return {
+      ok: false,
+      newCommits: added,
+      error: `Local is behind origin/${issue.branch}; another writer is on this branch.`,
+      transcriptPath,
+    };
+  }
+
   return { ok: true, newCommits: added, transcriptPath };
 }

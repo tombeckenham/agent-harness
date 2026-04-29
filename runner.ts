@@ -282,69 +282,84 @@ async function runFixCycle(
   args: RunnerArgs,
   index: number,
   issue: IssueState,
-  ciFailures: CiCheck[]
+  initialFailures: CiCheck[]
 ): Promise<HarnessState> {
-  const round = issue.attempts.fix + 1;
-  if (round > state.config.maxRounds) {
-    return persist(
-      state,
-      args.statePath,
-      index,
-      transition(issue, 'MAX_ROUNDS_EXCEEDED', 'CI fix cycle hit max rounds')
-    );
-  }
-  let working = persist(state, args.statePath, index, {
-    ...transition(issue, 'FIXING_CI'),
-    attempts: { ...issue.attempts, fix: round },
-  });
+  let working = state;
+  let current = issue;
+  let failures = initialFailures;
 
-  const fixResult = await runFixPhase({
-    issue: at(working.chain, index),
-    repo: args.repo,
-    runDir: args.runDir,
-    round,
-    maxRounds: state.config.maxRounds,
-    budgetMs: state.config.budgets.fixMs,
-    ciFailures,
-    log: args.log,
-  });
+  while (current.attempts.fix < state.config.maxRounds) {
+    const round = current.attempts.fix + 1;
+    working = persist(working, args.statePath, index, {
+      ...transition(current, 'FIXING_CI'),
+      attempts: { ...current.attempts, fix: round },
+    });
+    current = at(working.chain, index);
 
-  if (!fixResult.ok) {
-    return persist(
-      working,
-      args.statePath,
-      index,
-      recordError(
-        transition(at(working.chain, index), 'IMPL_FAILED', fixResult.error),
-        fixResult.error ?? 'unknown',
-        fixResult.transcriptPath
-      )
-    );
-  }
+    const fixResult = await runFixPhase({
+      issue: current,
+      repo: args.repo,
+      runDir: args.runDir,
+      round,
+      maxRounds: state.config.maxRounds,
+      budgetMs: state.config.budgets.fixMs,
+      ciFailures: failures,
+      log: args.log,
+    });
 
-  const ci = await pollCi({
-    pr: requirePr(at(working.chain, index)),
-    repo: args.repo,
-    budgetMs: state.config.budgets.ciMs,
-    log: args.log,
-  });
-  const next = at(working.chain, index);
-  if (ci.status === 'green') {
+    if (!fixResult.ok) {
+      working = persist(
+        working,
+        args.statePath,
+        index,
+        recordError(
+          transition(current, 'IMPL_FAILED', fixResult.error),
+          fixResult.error ?? 'unknown',
+          fixResult.transcriptPath
+        )
+      );
+      return working;
+    }
+
+    const ci = await pollCi({
+      pr: requirePr(at(working.chain, index)),
+      repo: args.repo,
+      budgetMs: state.config.budgets.ciMs,
+      log: args.log,
+    });
+    current = at(working.chain, index);
+
+    if (ci.status === 'green') {
+      working = persist(
+        working,
+        args.statePath,
+        index,
+        transition(current, 'CI_GREEN')
+      );
+      return working;
+    }
+    const reason = ci.status === 'red' ? ci.failureSummary : 'CI poll timeout';
     working = persist(
       working,
       args.statePath,
       index,
-      transition(next, 'CI_GREEN')
+      transition(current, 'CI_RED', reason)
     );
-  } else {
-    const reason = ci.status === 'red' ? ci.failureSummary : 'timeout';
-    working = persist(
-      working,
-      args.statePath,
-      index,
-      transition(next, 'MAX_ROUNDS_EXCEEDED', reason)
-    );
+    current = at(working.chain, index);
+    failures = ci.status === 'red' ? ci.checks : [];
   }
+
+  // Exhausted the budget.
+  working = persist(
+    working,
+    args.statePath,
+    index,
+    transition(
+      current,
+      'MAX_ROUNDS_EXCEEDED',
+      `CI still red after ${String(state.config.maxRounds)} fix rounds`
+    )
+  );
   return working;
 }
 

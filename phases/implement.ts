@@ -15,6 +15,7 @@ import {
   ghPrCreate,
   ghPrFindForBranch,
   pushBranch,
+  runLefthookPreCommit,
   type Repo,
 } from '../lib/git';
 import type { Logger } from '../lib/log';
@@ -175,7 +176,21 @@ export async function runImplementPhase(args: {
   }
   phaseLog.info('commits.created', { count: newCommits });
 
-  // 5. Push.
+  // 5. Lefthook self-check pre-push. Catches cases where Claude forgot.
+  const lefthook = await runLefthookPreCommit(issue.worktreePath);
+  if (lefthook.exitCode !== 0) {
+    phaseLog.warn('lefthook.failed', {
+      exitCode: lefthook.exitCode,
+      stderr: lefthook.stderr.slice(0, 2000),
+    });
+    return {
+      ok: false,
+      error: `Pre-push lefthook failed (exit ${lefthook.exitCode}). Last commit may not pass CI.`,
+      transcriptPath,
+    };
+  }
+
+  // 6. Push.
   await pushBranch(issue.branch, issue.worktreePath);
   phaseLog.info('branch.pushed', { branch: issue.branch });
 

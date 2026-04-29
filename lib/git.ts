@@ -119,6 +119,31 @@ export async function pushBranch(branch: string, cwd: string): Promise<void> {
   await runOk(['git', 'push', '-u', 'origin', branch], { cwd });
 }
 
+export type RemoteSyncStatus = 'in-sync' | 'ahead' | 'behind' | 'diverged';
+
+export async function remoteSyncStatus(
+  branch: string,
+  cwd: string
+): Promise<RemoteSyncStatus> {
+  await runOk(['git', 'fetch', 'origin', branch], { cwd });
+  const local = await runOk(['git', 'rev-parse', 'HEAD'], { cwd });
+  const remote = await runOk(['git', 'rev-parse', `origin/${branch}`], { cwd });
+  if (local === remote) return 'in-sync';
+  const { stdout: ahead } = await run(
+    ['git', 'rev-list', '--count', `origin/${branch}..HEAD`],
+    { cwd }
+  );
+  const { stdout: behind } = await run(
+    ['git', 'rev-list', '--count', `HEAD..origin/${branch}`],
+    { cwd }
+  );
+  const a = Number.parseInt(ahead.trim(), 10) || 0;
+  const b = Number.parseInt(behind.trim(), 10) || 0;
+  if (a > 0 && b === 0) return 'ahead';
+  if (a === 0 && b > 0) return 'behind';
+  return 'diverged';
+}
+
 export async function runLefthookPreCommit(cwd: string): Promise<RunResult> {
   return run(['bun', 'lefthook', 'run', 'pre-commit'], { cwd });
 }

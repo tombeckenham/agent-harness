@@ -11,8 +11,16 @@ import type { Logger } from '../lib/log';
 import { buildReviewPrompt } from '../lib/prompt';
 import type { IssueState } from '../lib/state';
 
+// Reviewer is read-only on the working tree and limited to gh subcommands
+// that fetch PR context or post comments — it cannot close, merge, edit
+// labels/title, or otherwise mutate the PR's metadata.
 const ALLOWED_TOOLS = [
-  'Bash(gh:*)',
+  'Bash(gh issue view:*)',
+  'Bash(gh pr view:*)',
+  'Bash(gh pr diff:*)',
+  'Bash(gh pr checks:*)',
+  'Bash(gh pr review:*)',
+  'Bash(gh pr comment:*)',
   'Bash(git diff:*)',
   'Bash(git log:*)',
   'Bash(git show:*)',
@@ -28,6 +36,11 @@ const DISALLOWED_TOOLS = [
   'Bash(git push:*)',
   'Bash(git commit:*)',
   'Bash(git reset:*)',
+  'Bash(gh pr close:*)',
+  'Bash(gh pr merge:*)',
+  'Bash(gh pr edit:*)',
+  'Bash(gh issue close:*)',
+  'Bash(gh issue edit:*)',
   'Bash(curl:*)',
   'Bash(wget:*)',
 ];
