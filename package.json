@@ -1,0 +1,48 @@
+{
+  "name": "agent-harness",
+  "version": "0.1.0",
+  "description": "Overnight runner for chains of dependent GitHub issues. Drives Claude Code through implement → CI → review → fix loops with stacked PRs.",
+  "type": "module",
+  "bin": {
+    "agent-harness": "./index.ts"
+  },
+  "files": [
+    "index.ts",
+    "runner.ts",
+    "lib/",
+    "phases/",
+    "prompts/",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "start": "bun --bun index.ts",
+    "test": "bun test",
+    "typecheck": "tsgo --noEmit"
+  },
+  "dependencies": {
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/bun": "1.3.12",
+    "@typescript/native-preview": "^7.0.0-dev.20260420.1",
+    "typescript": "^6.0.3"
+  },
+  "engines": {
+    "bun": ">=1.1.0"
+  },
+  "keywords": [
+    "claude-code",
+    "agent",
+    "github",
+    "automation",
+    "stacked-prs",
+    "ralph"
+  ],
+  "license": "MIT",
+  "author": "Tom Beckenham",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tombeckenham/agent-harness.git"
+  }
+}

@@ -1,13 +1,14 @@
+#!/usr/bin/env bun
 /**
  * Agent harness — overnight runner for chains of dependent GitHub issues.
  *
  * Usage:
- *   bun scripts/agent-harness --issues 504,505,506
- *   bun scripts/agent-harness --issues 504,505,506 --max-rounds 3
- *   bun scripts/agent-harness --resume
- *   bun scripts/agent-harness --issues 504 --dry-run
+ *   agent-harness --issues 504,505,506
+ *   agent-harness --issues 504,505,506 --max-rounds 3
+ *   agent-harness --resume
+ *   agent-harness --issues 504 --dry-run
  *
- * See scripts/agent-harness/README.md for design.
+ * See README.md for design.
  */
 
 import { existsSync, mkdirSync } from 'node:fs';
@@ -107,9 +108,9 @@ function printHelp(): void {
   console.log(`agent-harness — overnight chain runner for dependent issues
 
 Usage:
-  bun scripts/agent-harness --issues 504,505,506
-  bun scripts/agent-harness --resume
-  bun scripts/agent-harness --issues 504 --dry-run
+  agent-harness --issues 504,505,506
+  agent-harness --resume
+  agent-harness --issues 504 --dry-run
 
 Options:
   --issues 504,505,506   Ordered list of issue numbers (required unless --resume)
@@ -194,10 +195,6 @@ async function preflight(repoRoot: string): Promise<void> {
     throw new Error(
       'Working tree has uncommitted changes. Commit or stash before running.'
     );
-  }
-  // Probe lefthook config to fail fast if missing.
-  if (!existsSync(join(repoRoot, 'lefthook.yml'))) {
-    throw new Error('lefthook.yml not found at repo root.');
   }
 }
 

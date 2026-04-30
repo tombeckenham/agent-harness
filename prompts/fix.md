@@ -29,7 +29,7 @@ so the harness operator can adjust the CI budget.
 
 1. Address each blocking comment. Skim non-blocking nits and apply only the high-value ones.
 2. If a CI job failed or got stuck, look at `{{ciLogPath}}` for the excerpt and fix the root cause. Do not paper over with skips.
-3. Run `bun lefthook run pre-commit` until it passes.
+3. Run the repo's pre-commit checks (lefthook, husky, pre-commit, or `package.json` scripts) until they pass.
 4. Commit with a message starting with `fix:` and ending with `#{{issue}}` (e.g. `fix: address review feedback on validator #504`).
 5. Push the new commit(s): `git push`.
 6. Do NOT close review threads — the next review round decides.

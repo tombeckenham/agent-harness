@@ -2,7 +2,7 @@
  * Live viewer for a Claude stream-json transcript. Designed to be run inside
  * a tmux window the harness opens for each Claude subprocess:
  *
- *   bun scripts/agent-harness/lib/viewer.ts <transcript-path>
+ *   bun /path/to/agent-harness/lib/viewer.ts <transcript-path>
  *
  * Polls the file (works even before it's been created), parses each new line
  * as a stream-json event, and prints a colorized human-readable summary.
