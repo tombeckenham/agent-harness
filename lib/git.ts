@@ -201,10 +201,6 @@ export async function remoteSyncStatus(
   return 'diverged';
 }
 
-export async function runLefthookPreCommit(cwd: string): Promise<RunResult> {
-  return run(['bun', 'lefthook', 'run', 'pre-commit'], { cwd });
-}
-
 export async function ghAuthOk(): Promise<boolean> {
   const { exitCode } = await run(['gh', 'auth', 'status']);
   return exitCode === 0;

@@ -247,18 +247,6 @@ export function extractFencedJson<T>(
   }
 }
 
-export type ImplementVerdict = {
-  status: 'done' | 'blocked';
-  reason?: string;
-  summary?: string;
-};
-
-export function isImplementVerdict(v: unknown): v is ImplementVerdict {
-  if (typeof v !== 'object' || v === null) return false;
-  const status = (v as { status?: unknown }).status;
-  return status === 'done' || status === 'blocked';
-}
-
 export type ReviewVerdictJson = {
   verdict: 'clean' | 'needs_changes';
   blockingCount?: number;

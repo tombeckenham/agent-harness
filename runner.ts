@@ -1,16 +1,31 @@
-import type { CiCheck, Repo } from './lib/git';
+import {
+  buildPrevPrSummary,
+  formatPrBody,
+  formatPrTitle,
+  prepareIssueWorktree,
+} from './lib/branch';
+import { peekCi, pollCi } from './lib/ci';
+import {
+  commitsSince,
+  ghIssueView,
+  ghPrAddLabel,
+  ghPrCreate,
+  ghPrFindForBranch,
+  pushBranch,
+  remoteSyncStatus,
+  type Repo,
+} from './lib/git';
 import type { Logger } from './lib/log';
-import { pollCi } from './phases/ci';
-import { runFixPhase } from './phases/fix';
-import { runImplementPhase } from './phases/implement';
-import { runReviewPhase } from './phases/review';
+import { gatherWorldState, runEngineerStep } from './lib/ralphy';
 import {
   recordError,
   saveState,
-  transition,
   type HarnessState,
   type IssueState,
 } from './lib/state';
+import { runReviewPhase } from './phases/review';
+
+const HARNESS_LABEL = 'harness-active';
 
 export type RunnerArgs = {
   state: HarnessState;
@@ -24,248 +39,334 @@ export type RunnerArgs = {
 function at<T>(arr: T[], i: number): T {
   const v = arr[i];
   if (v === undefined) {
-    throw new Error(`Index ${i} out of bounds (length ${arr.length})`);
+    throw new Error(
+      `Index ${String(i)} out of bounds (length ${String(arr.length)})`
+    );
   }
   return v;
-}
-
-function requirePr(issue: IssueState): number {
-  if (issue.prNumber === undefined) {
-    throw new Error(`Issue #${issue.issue} is missing a PR number`);
-  }
-  return issue.prNumber;
 }
 
 export async function runChain(args: RunnerArgs): Promise<HarnessState> {
   let state = args.state;
 
   for (let i = 0; i < state.chain.length; i++) {
-    let issue = at(state.chain, i);
-    args.log.info('issue.start', {
-      issue: issue.issue,
-      phase: issue.phase,
-      base: issue.baseRef,
-      branch: issue.branch,
+    const issueLog = args.log.child({ issue: state.chain[i]?.issue });
+    issueLog.info('issue.start', {
+      status: at(state.chain, i).status,
+      base: at(state.chain, i).baseRef,
+      branch: at(state.chain, i).branch,
     });
 
-    if (issue.phase === 'DONE') {
-      args.log.info('issue.skip-done', { issue: issue.issue });
+    if (at(state.chain, i).status === 'done') {
+      issueLog.info('issue.skip-done');
       continue;
     }
 
-    const issueDeadline = Date.now() + state.config.budgets.issueHardCapMs;
-    const update = (next: IssueState): void => {
-      issue = next;
-      state = persist(state, args.statePath, i, next);
-    };
+    state = await runIssue(state, args, i, issueLog);
 
-    try {
-      // ----- Implement -----
+    const finalStatus = at(state.chain, i).status;
+    if (finalStatus === 'failed') {
       if (
-        issue.phase === 'PENDING' ||
-        issue.phase === 'PREPARING_BRANCH' ||
-        issue.phase === 'IMPLEMENTING'
+        state.config.onFailure === 'stop' ||
+        state.config.onFailure === 'prompt'
       ) {
-        update(transition(issue, 'IMPLEMENTING'));
-        update({
-          ...issue,
-          attempts: {
-            ...issue.attempts,
-            implement: issue.attempts.implement + 1,
-          },
-        });
-        const prevSummary =
-          i > 0
-            ? buildPrevSummary(at(state.chain, i - 1))
-            : 'None — first PR in chain.';
-        const result = await runImplementPhase({
-          issue,
-          repo: args.repo,
-          repoRoot: args.repoRoot,
-          runDir: args.runDir,
-          prevPrSummary: prevSummary,
-          budgetMs: state.config.budgets.implementMs,
-          log: args.log,
-        });
-        if (!result.ok) {
-          update(
-            recordError(
-              transition(issue, 'IMPL_FAILED', result.error),
-              result.error ?? 'unknown error',
-              result.transcriptPath
-            )
-          );
-          return finishOrContinue(state, args, i, 'implement failed');
-        }
-        update({ ...issue, prNumber: result.prNumber });
-        update(transition(issue, 'PR_OPEN'));
+        issueLog.warn('chain.stop', { reason: 'issue failed' });
+        return state;
       }
+      issueLog.warn('chain.skip', { reason: 'issue failed' });
+      continue;
+    }
 
-      // ----- CI gate (after implement, before review) -----
-      if (issue.phase === 'PR_OPEN' || issue.phase === 'CI_PENDING') {
-        update(transition(issue, 'CI_PENDING'));
-        const ci = await pollCi({
-          pr: requirePr(issue),
-          repo: args.repo,
-          budgetMs: state.config.budgets.ciMs,
-          log: args.log,
-        });
-        if (ci.status === 'green') {
-          update(transition(issue, 'CI_GREEN'));
-        } else if (ci.status === 'red' || ci.status === 'timeout') {
-          const reason =
-            ci.status === 'red'
-              ? ci.failureSummary
-              : `CI poll timeout — ${ci.checks.length} checks still pending`;
-          update(transition(issue, 'CI_RED', reason));
-          state = await runFixCycle(state, args, i, issue, ci.checks);
-          issue = at(state.chain, i);
-          if (
-            issue.phase === 'IMPL_FAILED' ||
-            issue.phase === 'MAX_ROUNDS_EXCEEDED'
-          ) {
-            return finishOrContinue(
-              state,
-              args,
-              i,
-              'CI failures unrecoverable'
-            );
-          }
-        }
-      }
-
-      // ----- Review loop -----
-      if (
-        issue.phase === 'CI_GREEN' ||
-        issue.phase === 'REVIEWING' ||
-        issue.phase === 'HAS_FEEDBACK' ||
-        issue.phase === 'FIXING'
-      ) {
-        let round = issue.attempts.review;
-        while (round < state.config.maxRounds) {
-          if (Date.now() > issueDeadline) {
-            update(
-              transition(issue, 'REVIEW_FAILED', 'issue hard cap exceeded')
-            );
-            return finishOrContinue(state, args, i, 'issue hard cap');
-          }
-          round++;
-          update({
-            ...issue,
-            attempts: { ...issue.attempts, review: round },
-          });
-          update(transition(issue, 'REVIEWING'));
-          const verdict = await runReviewPhase({
-            issue,
-            repo: args.repo,
-            repoRoot: args.repoRoot,
-            runDir: args.runDir,
-            round,
-            maxRounds: state.config.maxRounds,
-            budgetMs: state.config.budgets.reviewMs,
-            log: args.log,
-          });
-          if (verdict.verdict === 'clean') {
-            update(transition(issue, 'CLEAN', verdict.summary));
-            break;
-          }
-          update(transition(issue, 'HAS_FEEDBACK', verdict.summary));
-
-          // Run a fix round.
-          update({
-            ...issue,
-            attempts: { ...issue.attempts, fix: issue.attempts.fix + 1 },
-          });
-          update(transition(issue, 'FIXING'));
-          const fixResult = await runFixPhase({
-            issue,
-            repo: args.repo,
-            runDir: args.runDir,
-            round,
-            maxRounds: state.config.maxRounds,
-            budgetMs: state.config.budgets.fixMs,
-            ciFailures: null,
-            log: args.log,
-          });
-          if (!fixResult.ok) {
-            update(
-              recordError(
-                transition(issue, 'REVIEW_FAILED', fixResult.error),
-                fixResult.error ?? 'unknown',
-                fixResult.transcriptPath
-              )
-            );
-            return finishOrContinue(state, args, i, 'fix phase failed');
-          }
-
-          // After fix: poll CI again.
-          update(transition(issue, 'CI_PENDING'));
-          const ci2 = await pollCi({
-            pr: requirePr(issue),
-            repo: args.repo,
-            budgetMs: state.config.budgets.ciMs,
-            log: args.log,
-          });
-          if (ci2.status === 'green') {
-            update(transition(issue, 'CI_GREEN'));
-          } else {
-            const reason =
-              ci2.status === 'red'
-                ? ci2.failureSummary
-                : `CI poll timeout — ${ci2.checks.length} checks still pending`;
-            update(transition(issue, 'CI_RED', reason));
-            state = await runFixCycle(state, args, i, issue, ci2.checks);
-            issue = at(state.chain, i);
-            if (
-              issue.phase === 'IMPL_FAILED' ||
-              issue.phase === 'MAX_ROUNDS_EXCEEDED'
-            ) {
-              return finishOrContinue(state, args, i, 'fix CI failed');
-            }
-          }
-        }
-
-        if (issue.phase !== 'CLEAN') {
-          update(
-            transition(
-              issue,
-              'MAX_ROUNDS_EXCEEDED',
-              `hit ${String(state.config.maxRounds)} rounds`
-            )
-          );
-          return finishOrContinue(state, args, i, 'max rounds exceeded');
-        }
-      }
-
-      // ----- Done -----
-      update(transition(issue, 'DONE'));
-      args.log.info('issue.done', {
-        issue: issue.issue,
-        pr: issue.prNumber ?? null,
-      });
-
-      // Set the next issue's baseRef to this branch.
-      if (i + 1 < state.chain.length) {
-        const next = at(state.chain, i + 1);
-        const updated = { ...next, baseRef: issue.branch };
-        state = {
-          ...state,
-          chain: state.chain.map((s, idx) => (idx === i + 1 ? updated : s)),
-        };
-        saveState(args.statePath, state);
-      }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      args.log.error('issue.exception', { issue: issue.issue, msg });
-      update(recordError(transition(issue, 'IMPL_FAILED', msg), msg));
-      return finishOrContinue(state, args, i, 'exception');
+    // Wire next issue's baseRef.
+    if (i + 1 < state.chain.length) {
+      const next = at(state.chain, i + 1);
+      const updated = { ...next, baseRef: at(state.chain, i).branch };
+      state = persistAt(state, args.statePath, i + 1, updated);
     }
   }
 
   return state;
 }
 
-function persist(
+async function runIssue(
+  state: HarnessState,
+  args: RunnerArgs,
+  index: number,
+  log: Logger
+): Promise<HarnessState> {
+  let working = state;
+  const update = (next: IssueState): void => {
+    working = persistAt(working, args.statePath, index, next);
+  };
+
+  let issue = at(working.chain, index);
+  update({ ...issue, status: 'in-progress' });
+  issue = at(working.chain, index);
+
+  try {
+    await prepareIssueWorktree({
+      issue,
+      repoRoot: args.repoRoot,
+      log,
+    });
+  } catch (err) {
+    update(
+      recordError(
+        issue,
+        `worktree prep failed: ${err instanceof Error ? err.message : String(err)}`
+      )
+    );
+    return working;
+  }
+
+  // Adopt an existing PR if a previous run already opened one.
+  if (issue.prNumber === undefined) {
+    const existing = await ghPrFindForBranch(issue.branch, args.repo);
+    if (existing !== null) {
+      log.info('pr.adopted', { pr: existing });
+      update({ ...issue, prNumber: existing });
+      issue = at(working.chain, index);
+    }
+  }
+
+  const issueDeadline = Date.now() + working.config.budgets.issueHardCapMs;
+  const prevPrSummary = buildPrevPrSummary(
+    index > 0 ? at(working.chain, index - 1) : undefined
+  );
+
+  while (issue.rounds < working.config.maxRounds) {
+    if (Date.now() > issueDeadline) {
+      update(recordError(issue, 'issue hard cap exceeded'));
+      return working;
+    }
+
+    const round = issue.rounds + 1;
+    update({ ...issue, rounds: round });
+    issue = at(working.chain, index);
+
+    const snapshot = await gatherWorldState({ issue, repo: args.repo, log });
+    log.info('ralphy.snapshot', {
+      round,
+      hasPr: issue.prNumber !== undefined,
+      branchPreview: snapshot.branchState.slice(0, 80),
+      ciPreview: snapshot.ciState.slice(0, 80),
+    });
+
+    // If PR is open and CI is green and there's no unaddressed feedback,
+    // jump straight to a reviewer pass instead of burning an engineer turn.
+    if (issue.prNumber !== undefined && issueLooksReadyForReview(snapshot)) {
+      const verdict = await runReviewer(working, args, index, issue, log);
+      working = verdict.state;
+      issue = at(working.chain, index);
+      if (issue.status === 'done' || issue.status === 'failed') return working;
+      continue;
+    }
+
+    const stepResult = await runEngineerStep({
+      issue,
+      repo: args.repo,
+      runDir: args.runDir,
+      prevPrSummary,
+      budgetMs: working.config.budgets.engineerMs,
+      maxRounds: working.config.maxRounds,
+      round,
+      snapshot,
+      log,
+    });
+
+    if (!stepResult.ok) {
+      update(
+        recordError(
+          issue,
+          stepResult.error ?? 'engineer step failed',
+          stepResult.transcriptPath
+        )
+      );
+      return working;
+    }
+
+    if (stepResult.verdict?.status === 'blocked') {
+      update(
+        recordError(
+          issue,
+          `agent reported blocked: ${stepResult.verdict.reason ?? '(no reason)'}`,
+          stepResult.transcriptPath
+        )
+      );
+      return working;
+    }
+
+    // Push any new commits and ensure a PR exists.
+    if (stepResult.newCommits > 0 || (await hasUnpushedCommits(issue))) {
+      await pushIfBehind(issue, log);
+      if (issue.prNumber === undefined) {
+        const pr = await openPr(
+          issue,
+          args.repo,
+          log,
+          stepResult.verdict?.summary ?? ''
+        );
+        update({ ...issue, prNumber: pr });
+        issue = at(working.chain, index);
+      }
+    }
+
+    if (stepResult.verdict?.status === 'done') {
+      // Agent thinks it's done — gate on a reviewer pass before believing it.
+      if (issue.prNumber === undefined) {
+        // No PR means no commits made — agent prematurely declared done.
+        update(
+          recordError(
+            issue,
+            'agent reported done but no PR exists (no commits made)',
+            stepResult.transcriptPath
+          )
+        );
+        return working;
+      }
+      // Wait for CI to settle, then run the reviewer.
+      await awaitCiSettled(issue.prNumber, args.repo, working, log);
+      issue = at(working.chain, index);
+      const verdict = await runReviewer(working, args, index, issue, log);
+      working = verdict.state;
+      issue = at(working.chain, index);
+      if (issue.status === 'done' || issue.status === 'failed') return working;
+      continue;
+    }
+
+    // status === 'continue': loop back, fresh snapshot next iteration.
+  }
+
+  update(
+    recordError(
+      issue,
+      `max rounds (${String(working.config.maxRounds)}) exhausted without completion`
+    )
+  );
+  return working;
+}
+
+function issueLooksReadyForReview(snapshot: {
+  branchState: string;
+  ciState: string;
+  reviewState: string;
+}): boolean {
+  const ciGreen = /CI is green/.test(snapshot.ciState);
+  const noFeedback = /No review comments yet/.test(snapshot.reviewState);
+  const hasCommits = !/No commits yet/.test(snapshot.branchState);
+  return ciGreen && noFeedback && hasCommits;
+}
+
+async function awaitCiSettled(
+  pr: number,
+  repo: Repo,
+  state: HarnessState,
+  log: Logger
+): Promise<void> {
+  const peek = await peekCi(pr, repo);
+  if (peek.status === 'green' || peek.status === 'red') return;
+  log.info('ci.awaiting-settle', { pr });
+  await pollCi({ pr, repo, budgetMs: state.config.budgets.ciMs, log });
+}
+
+async function runReviewer(
+  state: HarnessState,
+  args: RunnerArgs,
+  index: number,
+  issue: IssueState,
+  log: Logger
+): Promise<{ state: HarnessState }> {
+  if (issue.prNumber === undefined) {
+    return { state };
+  }
+  const reviewRound = issue.reviewRounds + 1;
+  let working = persistAt(state, args.statePath, index, {
+    ...issue,
+    reviewRounds: reviewRound,
+  });
+  const updated = at(working.chain, index);
+
+  const verdict = await runReviewPhase({
+    issue: updated,
+    repo: args.repo,
+    repoRoot: args.repoRoot,
+    runDir: args.runDir,
+    round: reviewRound,
+    maxRounds: state.config.maxRounds,
+    budgetMs: state.config.budgets.reviewMs,
+    log,
+  });
+
+  log.info('review.verdict', {
+    verdict: verdict.verdict,
+    blockingCount: verdict.blockingCount,
+  });
+
+  if (verdict.verdict === 'clean') {
+    working = persistAt(working, args.statePath, index, {
+      ...at(working.chain, index),
+      status: 'done',
+    });
+  }
+  // If needs_changes: leave status as in-progress; the next engineer iteration
+  // will see the feedback in its snapshot and address it.
+  return { state: working };
+}
+
+async function pushIfBehind(issue: IssueState, log: Logger): Promise<void> {
+  const sync = await remoteSyncStatus(issue.branch, issue.worktreePath);
+  if (sync === 'in-sync') return;
+  if (sync === 'ahead') {
+    log.info('branch.push', { branch: issue.branch });
+    await pushBranch(issue.branch, issue.worktreePath);
+    return;
+  }
+  if (sync === 'behind' || sync === 'diverged') {
+    throw new Error(
+      `Branch ${issue.branch} is ${sync} from origin; refusing to push.`
+    );
+  }
+}
+
+async function hasUnpushedCommits(issue: IssueState): Promise<boolean> {
+  const sync = await remoteSyncStatus(issue.branch, issue.worktreePath).catch(
+    () => 'in-sync' as const
+  );
+  return sync === 'ahead';
+}
+
+async function openPr(
+  issue: IssueState,
+  repo: Repo,
+  log: Logger,
+  summary: string
+): Promise<number> {
+  const meta = await ghIssueView(issue.issue, repo);
+  const title = formatPrTitle(meta.title, issue.issue);
+  const body = formatPrBody({
+    issue: issue.issue,
+    summary,
+    isStacked: issue.baseRef !== 'main',
+    baseRef: issue.baseRef,
+  });
+  const commits = await commitsSince(issue.baseRef, issue.worktreePath);
+  if (commits === 0) {
+    throw new Error('Cannot open PR: no commits on branch yet.');
+  }
+  const pr = await ghPrCreate({
+    cwd: issue.worktreePath,
+    base: issue.baseRef,
+    head: issue.branch,
+    title,
+    body,
+    draft: false,
+  });
+  log.info('pr.created', { pr });
+  await ghPrAddLabel(pr, HARNESS_LABEL, repo);
+  return pr;
+}
+
+function persistAt(
   state: HarnessState,
   statePath: string,
   index: number,
@@ -277,125 +378,4 @@ function persist(
   };
   saveState(statePath, updated);
   return updated;
-}
-
-async function runFixCycle(
-  state: HarnessState,
-  args: RunnerArgs,
-  index: number,
-  issue: IssueState,
-  initialFailures: CiCheck[]
-): Promise<HarnessState> {
-  let working = state;
-  let current = issue;
-  let failures = initialFailures;
-
-  while (current.attempts.fix < state.config.maxRounds) {
-    const round = current.attempts.fix + 1;
-    working = persist(working, args.statePath, index, {
-      ...transition(current, 'FIXING_CI'),
-      attempts: { ...current.attempts, fix: round },
-    });
-    current = at(working.chain, index);
-
-    const fixResult = await runFixPhase({
-      issue: current,
-      repo: args.repo,
-      runDir: args.runDir,
-      round,
-      maxRounds: state.config.maxRounds,
-      budgetMs: state.config.budgets.fixMs,
-      ciFailures: failures,
-      log: args.log,
-    });
-
-    if (!fixResult.ok) {
-      working = persist(
-        working,
-        args.statePath,
-        index,
-        recordError(
-          transition(current, 'IMPL_FAILED', fixResult.error),
-          fixResult.error ?? 'unknown',
-          fixResult.transcriptPath
-        )
-      );
-      return working;
-    }
-
-    const ci = await pollCi({
-      pr: requirePr(at(working.chain, index)),
-      repo: args.repo,
-      budgetMs: state.config.budgets.ciMs,
-      log: args.log,
-    });
-    current = at(working.chain, index);
-
-    if (ci.status === 'green') {
-      working = persist(
-        working,
-        args.statePath,
-        index,
-        transition(current, 'CI_GREEN')
-      );
-      return working;
-    }
-    const reason =
-      ci.status === 'red'
-        ? ci.failureSummary
-        : `CI poll timeout — ${ci.checks.length} checks still pending`;
-    working = persist(
-      working,
-      args.statePath,
-      index,
-      transition(current, 'CI_RED', reason)
-    );
-    current = at(working.chain, index);
-    failures = ci.checks;
-  }
-
-  // Exhausted the budget.
-  working = persist(
-    working,
-    args.statePath,
-    index,
-    transition(
-      current,
-      'MAX_ROUNDS_EXCEEDED',
-      `CI still red after ${String(state.config.maxRounds)} fix rounds`
-    )
-  );
-  return working;
-}
-
-function finishOrContinue(
-  state: HarnessState,
-  args: RunnerArgs,
-  index: number,
-  reason: string
-): HarnessState {
-  args.log.warn('issue.terminal-failure', { index, reason });
-  if (state.config.onFailure === 'stop') {
-    args.log.warn('chain.stop', { reason });
-    return state;
-  }
-  if (state.config.onFailure === 'skip') {
-    args.log.warn('chain.skip', { reason });
-    return state;
-  }
-  args.log.warn('chain.stop-on-prompt', { reason });
-  return state;
-}
-
-function buildPrevSummary(prev: IssueState): string {
-  const prLine =
-    prev.prNumber === undefined
-      ? 'No PR yet.'
-      : `PR: #${String(prev.prNumber)}`;
-  return [
-    `Issue #${String(prev.issue)}: ${prev.title}`,
-    `Branch: ${prev.branch}`,
-    prLine,
-    `Status: ${prev.phase}`,
-  ].join('\n');
 }

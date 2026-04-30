@@ -19,7 +19,7 @@ function render(
   });
 }
 
-export type ImplementVars = {
+export type EngineerVars = {
   issue: number;
   title: string;
   body: string;
@@ -28,11 +28,18 @@ export type ImplementVars = {
   branch: string;
   baseRef: string;
   prevPrSummary: string;
+  round: number;
+  maxRounds: number;
+  branchState: string;
+  prState: string;
+  ciState: string;
+  reviewState: string;
+  pr: number;
   budgetMinutes: number;
 };
 
-export function buildImplementPrompt(vars: ImplementVars): string {
-  return render(load('implement.md'), vars);
+export function buildEngineerPrompt(vars: EngineerVars): string {
+  return render(load('engineer.md'), vars);
 }
 
 export type ReviewVars = {
@@ -49,23 +56,4 @@ export type ReviewVars = {
 
 export function buildReviewPrompt(vars: ReviewVars): string {
   return render(load('review.md'), vars);
-}
-
-export type FixVars = {
-  repo: string;
-  pr: number;
-  issue: number;
-  title: string;
-  branch: string;
-  cwd: string;
-  round: number;
-  maxRounds: number;
-  reviewBlock: string;
-  ciBlock: string;
-  ciLogPath: string;
-  budgetMinutes: number;
-};
-
-export function buildFixPrompt(vars: FixVars): string {
-  return render(load('fix.md'), vars);
 }

@@ -163,14 +163,16 @@ async function buildChainState(args: {
       branch,
       baseRef: i === 0 ? args.baseRef : '__placeholder__',
       worktreePath,
-      phase: 'PENDING',
-      attempts: { implement: 0, fix: 0, review: 0 },
-      events: [],
+      status: 'pending',
+      rounds: 0,
+      reviewRounds: 0,
     });
   }
   // Wire up baseRefs in a second pass so each points at the prior branch.
   for (let i = 1; i < chain.length; i++) {
-    chain[i].baseRef = chain[i - 1].branch;
+    const cur = chain[i];
+    const prev = chain[i - 1];
+    if (cur && prev) cur.baseRef = prev.branch;
   }
   return {
     runId: args.runId,
@@ -299,14 +301,14 @@ async function main(): Promise<void> {
   // Print final summary.
   console.log('\n=== Final ===');
   for (const s of final.chain) {
-    const pr = s.prNumber ? `PR #${s.prNumber}` : 'no PR';
-    console.log(`  #${s.issue} → ${s.phase} (${pr})`);
+    const pr = s.prNumber ? `PR #${String(s.prNumber)}` : 'no PR';
+    console.log(`  #${String(s.issue)} → ${s.status} (${pr})`);
     if (s.lastError) {
       console.log(`     error: ${s.lastError.message}`);
     }
   }
 
-  const allDone = final.chain.every((s) => s.phase === 'DONE');
+  const allDone = final.chain.every((s) => s.status === 'done');
   process.exit(allDone ? 0 : 1);
 }
 
