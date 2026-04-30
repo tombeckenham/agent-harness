@@ -19,10 +19,12 @@ export async function pollCi(args: {
   const phaseLog = log.child({ phase: 'ci' });
   const deadline = Date.now() + budgetMs;
   let lastSummary = '';
+  let latestChecks: CiCheck[] = [];
 
   while (Date.now() < deadline) {
     if (args.signal?.aborted) break;
     const checks = await ghPrChecks(pr, repo);
+    latestChecks = checks;
 
     if (checks.length === 0) {
       // No checks yet — keep waiting.
@@ -53,7 +55,8 @@ export async function pollCi(args: {
     await sleep(POLL_INTERVAL_MS, args.signal);
   }
 
-  return { status: 'timeout', checks: [] };
+  // Surface the most recent observation so a fix agent has something to act on.
+  return { status: 'timeout', checks: latestChecks };
 }
 
 function summarize(checks: CiCheck[]): string {

@@ -112,8 +112,12 @@ export async function runChain(args: RunnerArgs): Promise<HarnessState> {
         });
         if (ci.status === 'green') {
           update(transition(issue, 'CI_GREEN'));
-        } else if (ci.status === 'red') {
-          update(transition(issue, 'CI_RED', ci.failureSummary));
+        } else if (ci.status === 'red' || ci.status === 'timeout') {
+          const reason =
+            ci.status === 'red'
+              ? ci.failureSummary
+              : `CI poll timeout — ${ci.checks.length} checks still pending`;
+          update(transition(issue, 'CI_RED', reason));
           state = await runFixCycle(state, args, i, issue, ci.checks);
           issue = at(state.chain, i);
           if (
@@ -127,9 +131,6 @@ export async function runChain(args: RunnerArgs): Promise<HarnessState> {
               'CI failures unrecoverable'
             );
           }
-        } else {
-          update(transition(issue, 'CI_RED', 'CI poll timeout'));
-          return finishOrContinue(state, args, i, 'CI timed out');
         }
       }
 
@@ -209,10 +210,11 @@ export async function runChain(args: RunnerArgs): Promise<HarnessState> {
             update(transition(issue, 'CI_GREEN'));
           } else {
             const reason =
-              ci2.status === 'red' ? ci2.failureSummary : 'timeout';
+              ci2.status === 'red'
+                ? ci2.failureSummary
+                : `CI poll timeout — ${ci2.checks.length} checks still pending`;
             update(transition(issue, 'CI_RED', reason));
-            const ciChecks = ci2.status === 'red' ? ci2.checks : [];
-            state = await runFixCycle(state, args, i, issue, ciChecks);
+            state = await runFixCycle(state, args, i, issue, ci2.checks);
             issue = at(state.chain, i);
             if (
               issue.phase === 'IMPL_FAILED' ||
@@ -338,7 +340,10 @@ async function runFixCycle(
       );
       return working;
     }
-    const reason = ci.status === 'red' ? ci.failureSummary : 'CI poll timeout';
+    const reason =
+      ci.status === 'red'
+        ? ci.failureSummary
+        : `CI poll timeout — ${ci.checks.length} checks still pending`;
     working = persist(
       working,
       args.statePath,
@@ -346,7 +351,7 @@ async function runFixCycle(
       transition(current, 'CI_RED', reason)
     );
     current = at(working.chain, index);
-    failures = ci.status === 'red' ? ci.checks : [];
+    failures = ci.checks;
   }
 
   // Exhausted the budget.

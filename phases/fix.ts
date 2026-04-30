@@ -80,20 +80,32 @@ export async function runFixPhase(args: {
   const reviewBlock =
     [...reviewLines, ...commentLines].join('\n\n') || '_No review feedback._';
 
-  // CI failure block + log file the prompt can reference.
+  // CI failure block + log file the prompt can reference. Includes both
+  // `failure`-concluded checks and checks still pending/in-progress when
+  // CI timed out, so the agent can investigate stuck jobs as well as
+  // outright failures.
   const ciLogPath = join(issueDir, `ci-failures-${round}.txt`);
   let ciBlock = '_No CI failures._';
   if (ciFailures && ciFailures.length > 0) {
-    const failed = ciFailures.filter((c) => c.conclusion === 'failure');
-    if (failed.length > 0) {
-      ciBlock = failed
-        .map((c) => `- **${c.name}**: ${c.conclusion}`)
+    const actionable = ciFailures.filter(
+      (c) => c.conclusion === 'failure' || c.status !== 'completed'
+    );
+    if (actionable.length > 0) {
+      ciBlock = actionable
+        .map((c) => {
+          const label =
+            c.conclusion === 'failure'
+              ? `failure`
+              : `still ${c.status} (no conclusion)`;
+          return `- **${c.name}**: ${label}`;
+        })
         .join('\n');
       writeFileSync(
         ciLogPath,
-        failed
+        actionable
           .map(
-            (c) => `${c.name}\n  status=${c.status} conclusion=${c.conclusion}`
+            (c) =>
+              `${c.name}\n  status=${c.status} conclusion=${c.conclusion ?? 'null'}`
           )
           .join('\n\n')
       );

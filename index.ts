@@ -23,6 +23,7 @@ import {
 } from './lib/git';
 import { createLogger } from './lib/log';
 import { runChain } from './runner';
+import { ensureSession, tmuxAvailable } from './lib/tmux';
 import {
   DEFAULT_BUDGETS,
   loadState,
@@ -39,6 +40,7 @@ type Args = {
   dryRun: boolean;
   resume: boolean;
   baseRef: string;
+  tmux: boolean;
 };
 
 const STATE_DIR = '.claude-harness';
@@ -51,6 +53,7 @@ function parseArgs(argv: string[]): Args {
   let dryRun = false;
   let resume = false;
   let baseRef = process.env.CLAUDE_HARNESS_DEFAULT_BASE ?? 'main';
+  let tmux = false;
 
   const requireValue = (flag: string, idx: number): string => {
     if (idx >= argv.length) {
@@ -84,6 +87,8 @@ function parseArgs(argv: string[]): Args {
       dryRun = true;
     } else if (a === '--resume') {
       resume = true;
+    } else if (a === '--tmux') {
+      tmux = true;
     } else if (a === '--help' || a === '-h') {
       printHelp();
       process.exit(0);
@@ -95,7 +100,7 @@ function parseArgs(argv: string[]): Args {
   if (!resume && issues.length === 0) {
     throw new Error('Provide --issues N,N,N or --resume');
   }
-  return { issues, maxRounds, onFailure, dryRun, resume, baseRef };
+  return { issues, maxRounds, onFailure, dryRun, resume, baseRef, tmux };
 }
 
 function printHelp(): void {
@@ -113,6 +118,8 @@ Options:
   --on-failure MODE      stop | skip | prompt (default: stop)
   --base REF             Base ref for the first issue's branch (default: main)
   --dry-run              Print the chain plan without spawning Claude
+  --tmux                 Open a tmux session with one window per Claude run.
+                         Attach from another terminal: tmux attach -t harness-<runId>
   --help                 Show this message
 `);
 }
@@ -259,6 +266,18 @@ async function main(): Promise<void> {
   if (args.dryRun) {
     console.log('Dry run — exiting without spawning Claude.');
     return;
+  }
+
+  if (args.tmux) {
+    if (!(await tmuxAvailable())) {
+      throw new Error('--tmux requested but `tmux -V` failed. Install tmux.');
+    }
+    const session = `harness-${state.runId}`;
+    await ensureSession(session);
+    process.env.HARNESS_TMUX_SESSION = session;
+    console.log(
+      `tmux session ready. Attach from another terminal:\n  tmux attach -t ${session}\n`
+    );
   }
 
   const runDir = join(repoRoot, STATE_DIR, 'runs', state.runId);

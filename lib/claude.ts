@@ -1,6 +1,7 @@
 import { appendFileSync, mkdirSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import type { Logger } from './log';
+import { openWindow, sanitizeWindowName } from './tmux';
 
 export type ClaudeRunOpts = {
   prompt: string;
@@ -23,11 +24,18 @@ export type ClaudeRunResult = {
   abortedForTimeout: boolean;
 };
 
+type ClaudeContentPart = {
+  type: string;
+  text?: string;
+  name?: string;
+  input?: Record<string, unknown>;
+};
+
 type ClaudeStreamEvent =
   | { type: 'system'; subtype?: string }
   | {
       type: 'assistant';
-      message: { content: Array<{ type: string; text?: string }> };
+      message: { content: ClaudeContentPart[] };
     }
   | { type: 'user'; message: { content: unknown } }
   | { type: 'result'; subtype?: string; is_error?: boolean; result?: string };
@@ -48,8 +56,60 @@ function lastTextFromAssistant(event: ClaudeStreamEvent): string | null {
   return texts.length > 0 ? texts.join('\n') : null;
 }
 
+function snippet(text: string, max = 140): string {
+  const oneLine = text.replace(/\s+/g, ' ').trim();
+  return oneLine.length <= max ? oneLine : `${oneLine.slice(0, max - 1)}…`;
+}
+
+function summarizeToolInput(part: ClaudeContentPart): string {
+  const input = part.input;
+  if (!input) return '';
+  // Pick the most informative single field per tool, fall back to the first key.
+  const preferred = ['command', 'file_path', 'path', 'pattern', 'description'];
+  for (const key of preferred) {
+    const v = input[key];
+    if (typeof v === 'string' && v.length > 0) return snippet(v, 100);
+  }
+  const firstKey = Object.keys(input)[0];
+  if (firstKey === undefined) return '';
+  const v = input[firstKey];
+  return typeof v === 'string' ? snippet(v, 100) : `${firstKey}=…`;
+}
+
+async function maybeOpenTmuxViewer(
+  transcriptPath: string,
+  log: Logger
+): Promise<void> {
+  const session = process.env.HARNESS_TMUX_SESSION;
+  if (!session) return;
+  const absTranscript = resolve(transcriptPath);
+  // Window name from `<issueDir>-<phaseN>` so each run gets a distinct window.
+  // e.g. transcripts/implement-1.jsonl in issue-615/ → "issue-615-implement-1"
+  const issueDir = basename(dirname(dirname(absTranscript)));
+  const file = basename(absTranscript, '.jsonl');
+  const window = sanitizeWindowName(`${issueDir}-${file}`);
+  const viewerScript = resolve(join(import.meta.dir, '..', 'lib', 'viewer.ts'));
+  // Quote both args defensively in case the run dir contains spaces.
+  const command = `bun ${shellQuote(viewerScript)} ${shellQuote(absTranscript)}`;
+  try {
+    await openWindow({ session, window, command });
+    log.info('tmux.window-opened', { session, window });
+  } catch (err) {
+    // tmux is a viewer convenience — never let a tmux failure abort a Claude run.
+    log.warn('tmux.window-failed', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+function shellQuote(s: string): string {
+  // Single-quote-safe shell escape for paths.
+  return `'${s.replace(/'/g, `'\\''`)}'`;
+}
+
 export async function runClaude(opts: ClaudeRunOpts): Promise<ClaudeRunResult> {
   mkdirSync(dirname(opts.transcriptPath), { recursive: true });
+  await maybeOpenTmuxViewer(opts.transcriptPath, opts.log);
 
   const args = [
     'claude',
@@ -112,9 +172,18 @@ export async function runClaude(opts: ClaudeRunOpts): Promise<ClaudeRunResult> {
             const evt = raw;
             if (evt.type === 'assistant') {
               const text = lastTextFromAssistant(evt);
-              if (text) lastAssistantText = text;
+              if (text) {
+                lastAssistantText = text;
+                opts.log.info('claude.text', { snippet: snippet(text) });
+              }
               for (const part of evt.message.content) {
-                if (part.type === 'tool_use') toolUseCount++;
+                if (part.type === 'tool_use') {
+                  toolUseCount++;
+                  opts.log.info('claude.tool', {
+                    tool: part.name ?? '(unknown)',
+                    arg: summarizeToolInput(part),
+                  });
+                }
               }
             } else if (evt.type === 'result') {
               resultEvent = evt;

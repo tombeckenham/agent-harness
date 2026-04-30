@@ -35,6 +35,63 @@ export async function runOk(
   return stdout.trim();
 }
 
+const TRANSIENT_GH_PATTERNS: readonly RegExp[] = [
+  /connection (?:refused|reset)/i,
+  /i\/o timeout/i,
+  /timeout (?:awaiting|exceeded)/i,
+  /EOF/,
+  /HTTP 5\d\d/i,
+  /network is unreachable/i,
+  /temporary failure/i,
+  /unexpected EOF/i,
+  /context deadline exceeded/i,
+];
+
+export function isTransientGhError(stderr: string): boolean {
+  return TRANSIENT_GH_PATTERNS.some((re) => re.test(stderr));
+}
+
+export type RetryOpts = {
+  maxAttempts?: number;
+  baseDelayMs?: number;
+  signal?: AbortSignal;
+};
+
+/**
+ * Runs a `gh` command, retrying on transient network/server errors.
+ * Use only for idempotent reads — never for mutations.
+ */
+export async function runGhWithRetry(
+  cmd: string[],
+  opts: RunOpts & RetryOpts = {}
+): Promise<RunResult> {
+  const max = opts.maxAttempts ?? 3;
+  const base = opts.baseDelayMs ?? 2000;
+  let lastResult: RunResult | undefined;
+  for (let attempt = 1; attempt <= max; attempt++) {
+    if (opts.signal?.aborted) break;
+    const result = await run(cmd, opts);
+    lastResult = result;
+    if (result.exitCode === 0) return result;
+    if (!isTransientGhError(result.stderr)) return result;
+    if (attempt === max) break;
+    const delay = base * 2 ** (attempt - 1);
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, delay);
+      opts.signal?.addEventListener('abort', () => {
+        clearTimeout(timer);
+        resolve();
+      });
+    });
+  }
+  if (lastResult === undefined) {
+    throw new Error(
+      'runGhWithRetry: no attempts executed (aborted before run)'
+    );
+  }
+  return lastResult;
+}
+
 export type Repo = { owner: string; name: string };
 
 export async function detectRepo(cwd: string): Promise<Repo> {
@@ -164,7 +221,7 @@ export async function ghIssueView(
   issue: number,
   repo: Repo
 ): Promise<{ title: string; body: string; state: string; labels: string[] }> {
-  const json = await runOk([
+  const { stdout, stderr, exitCode } = await runGhWithRetry([
     'gh',
     'issue',
     'view',
@@ -174,7 +231,12 @@ export async function ghIssueView(
     '--json',
     'title,body,state,labels',
   ]);
-  const data = issueViewSchema.parse(JSON.parse(json));
+  if (exitCode !== 0) {
+    throw new Error(
+      `gh issue view failed (exit ${exitCode}): ${stderr.trim() || stdout.trim()}`
+    );
+  }
+  const data = issueViewSchema.parse(JSON.parse(stdout));
   return {
     title: data.title,
     body: data.body ?? '',
@@ -218,7 +280,7 @@ export async function ghPrFindForBranch(
   branch: string,
   repo: Repo
 ): Promise<number | null> {
-  const json = await runOk([
+  const { stdout, stderr, exitCode } = await runGhWithRetry([
     'gh',
     'pr',
     'list',
@@ -231,7 +293,14 @@ export async function ghPrFindForBranch(
     '--json',
     'number',
   ]);
-  const arr = z.array(z.object({ number: z.number() })).parse(JSON.parse(json));
+  if (exitCode !== 0) {
+    throw new Error(
+      `gh pr list failed (exit ${exitCode}): ${stderr.trim() || stdout.trim()}`
+    );
+  }
+  const arr = z
+    .array(z.object({ number: z.number() }))
+    .parse(JSON.parse(stdout));
   return arr[0]?.number ?? null;
 }
 
@@ -242,7 +311,7 @@ export type CiCheck = {
 };
 
 export async function ghPrChecks(pr: number, repo: Repo): Promise<CiCheck[]> {
-  const { stdout, exitCode } = await run([
+  const { stdout, stderr, exitCode } = await runGhWithRetry([
     'gh',
     'pr',
     'checks',
@@ -253,8 +322,16 @@ export async function ghPrChecks(pr: number, repo: Repo): Promise<CiCheck[]> {
     'name,status,conclusion',
   ]);
   // gh exits 8 when checks are pending or have failed; output is still JSON.
+  // gh exits 1 on a freshly-created PR before any check has been registered
+  // ("no checks reported on the 'X' branch"); treat that as an empty result so
+  // pollCi can keep waiting.
+  if (exitCode === 1 && /no checks reported/i.test(stderr)) {
+    return [];
+  }
   if (exitCode !== 0 && exitCode !== 8) {
-    throw new Error(`gh pr checks failed (exit ${exitCode})`);
+    throw new Error(
+      `gh pr checks failed (exit ${exitCode}): ${stderr.trim() || stdout.trim()}`
+    );
   }
   return ciCheckArraySchema.parse(JSON.parse(stdout || '[]'));
 }
@@ -279,7 +356,7 @@ export async function ghPrComments(
   }>;
   comments: Array<{ author: string; body: string; createdAt: string }>;
 }> {
-  const json = await runOk([
+  const { stdout, stderr, exitCode } = await runGhWithRetry([
     'gh',
     'pr',
     'view',
@@ -289,7 +366,12 @@ export async function ghPrComments(
     '--json',
     'reviews,comments',
   ]);
-  const data = prCommentsSchema.parse(JSON.parse(json));
+  if (exitCode !== 0) {
+    throw new Error(
+      `gh pr view failed (exit ${exitCode}): ${stderr.trim() || stdout.trim()}`
+    );
+  }
+  const data = prCommentsSchema.parse(JSON.parse(stdout));
   return {
     reviews: data.reviews.map((r) => ({
       author: r.author.login,
