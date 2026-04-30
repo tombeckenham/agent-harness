@@ -1,5 +1,15 @@
-import { appendFileSync, mkdirSync } from 'node:fs';
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
+import { open } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
+import { run } from './git';
 import type { Logger } from './log';
 import { openWindow, sanitizeWindowName } from './tmux';
 
@@ -76,41 +86,48 @@ function summarizeToolInput(part: ClaudeContentPart): string {
   return typeof v === 'string' ? snippet(v, 100) : `${firstKey}=…`;
 }
 
-async function maybeOpenTmuxViewer(
-  transcriptPath: string,
-  log: Logger
-): Promise<void> {
-  const session = process.env.HARNESS_TMUX_SESSION;
-  if (!session) return;
-  const absTranscript = resolve(transcriptPath);
-  // Window name from `<issueDir>-<phaseN>` so each run gets a distinct window.
-  // e.g. transcripts/implement-1.jsonl in issue-615/ → "issue-615-implement-1"
-  const issueDir = basename(dirname(dirname(absTranscript)));
-  const file = basename(absTranscript, '.jsonl');
-  const window = sanitizeWindowName(`${issueDir}-${file}`);
-  const viewerScript = resolve(join(import.meta.dir, '..', 'lib', 'viewer.ts'));
-  // Quote both args defensively in case the run dir contains spaces.
-  const command = `bun ${shellQuote(viewerScript)} ${shellQuote(absTranscript)}`;
+type StreamState = {
+  lastAssistantText: string;
+  resultEvent: ClaudeStreamEvent | null;
+  toolUseCount: number;
+};
+
+function processLine(line: string, state: StreamState, log: Logger): void {
+  if (line.trim().length === 0) return;
+  let raw: unknown;
   try {
-    await openWindow({ session, window, command });
-    log.info('tmux.window-opened', { session, window });
-  } catch (err) {
-    // tmux is a viewer convenience — never let a tmux failure abort a Claude run.
-    log.warn('tmux.window-failed', {
-      error: err instanceof Error ? err.message : String(err),
-    });
+    raw = JSON.parse(line);
+  } catch {
+    return;
+  }
+  if (!isClaudeStreamEvent(raw)) return;
+  const evt = raw;
+  if (evt.type === 'assistant') {
+    const text = lastTextFromAssistant(evt);
+    if (text) {
+      state.lastAssistantText = text;
+      log.info('claude.text', { snippet: snippet(text) });
+    }
+    for (const part of evt.message.content) {
+      if (part.type === 'tool_use') {
+        state.toolUseCount++;
+        log.info('claude.tool', {
+          tool: part.name ?? '(unknown)',
+          arg: summarizeToolInput(part),
+        });
+      }
+    }
+  } else if (evt.type === 'result') {
+    state.resultEvent = evt;
   }
 }
 
 function shellQuote(s: string): string {
-  // Single-quote-safe shell escape for paths.
+  // Single-quote-safe shell escape for paths and inline strings.
   return `'${s.replace(/'/g, `'\\''`)}'`;
 }
 
-export async function runClaude(opts: ClaudeRunOpts): Promise<ClaudeRunResult> {
-  mkdirSync(dirname(opts.transcriptPath), { recursive: true });
-  await maybeOpenTmuxViewer(opts.transcriptPath, opts.log);
-
+function buildClaudeArgs(opts: ClaudeRunOpts): string[] {
   const args = [
     'claude',
     '-p',
@@ -130,13 +147,32 @@ export async function runClaude(opts: ClaudeRunOpts): Promise<ClaudeRunResult> {
   if (opts.model) {
     args.push('--model', opts.model);
   }
+  return args;
+}
 
-  opts.log.info('claude.spawn', {
-    cmd: args
-      .slice(0, 1)
-      .concat(args.slice(2).filter((a) => a !== opts.prompt)),
-    cwd: opts.cwd,
+function logSpawn(log: Logger, args: string[], cwd: string, mode: string): void {
+  // Skip the prompt body (args[2]) so logs stay readable.
+  log.info('claude.spawn', {
+    mode,
+    cmd: [args[0], ...args.slice(3)],
+    cwd,
   });
+}
+
+export async function runClaude(opts: ClaudeRunOpts): Promise<ClaudeRunResult> {
+  mkdirSync(dirname(opts.transcriptPath), { recursive: true });
+  const args = buildClaudeArgs(opts);
+  const session = process.env.HARNESS_TMUX_SESSION;
+  return session
+    ? runClaudeInTmux(opts, args, session)
+    : runClaudeDirect(opts, args);
+}
+
+async function runClaudeDirect(
+  opts: ClaudeRunOpts,
+  args: string[]
+): Promise<ClaudeRunResult> {
+  logSpawn(opts.log, args, opts.cwd, 'direct');
 
   const startedAt = Date.now();
   const proc = Bun.spawn(args, {
@@ -146,9 +182,11 @@ export async function runClaude(opts: ClaudeRunOpts): Promise<ClaudeRunResult> {
     signal: opts.signal,
   });
 
-  let lastAssistantText = '';
-  let resultEvent: ClaudeStreamEvent | null = null;
-  let toolUseCount = 0;
+  const state: StreamState = {
+    lastAssistantText: '',
+    resultEvent: null,
+    toolUseCount: 0,
+  };
   let buf = '';
 
   const reader = proc.stdout.getReader();
@@ -166,31 +204,7 @@ export async function runClaude(opts: ClaudeRunOpts): Promise<ClaudeRunResult> {
         buf = buf.slice(nl + 1);
         if (line.trim().length > 0) {
           appendFileSync(opts.transcriptPath, `${line}\n`);
-          try {
-            const raw: unknown = JSON.parse(line);
-            if (!isClaudeStreamEvent(raw)) continue;
-            const evt = raw;
-            if (evt.type === 'assistant') {
-              const text = lastTextFromAssistant(evt);
-              if (text) {
-                lastAssistantText = text;
-                opts.log.info('claude.text', { snippet: snippet(text) });
-              }
-              for (const part of evt.message.content) {
-                if (part.type === 'tool_use') {
-                  toolUseCount++;
-                  opts.log.info('claude.tool', {
-                    tool: part.name ?? '(unknown)',
-                    arg: summarizeToolInput(part),
-                  });
-                }
-              }
-            } else if (evt.type === 'result') {
-              resultEvent = evt;
-            }
-          } catch {
-            // Non-JSON line; already persisted to transcript.
-          }
+          processLine(line, state, opts.log);
         }
         nl = buf.indexOf('\n');
       }
@@ -214,18 +228,205 @@ export async function runClaude(opts: ClaudeRunOpts): Promise<ClaudeRunResult> {
   opts.log.info('claude.exit', {
     exitCode,
     durationMs,
-    toolUseCount,
+    toolUseCount: state.toolUseCount,
     abortedForTimeout,
   });
 
   return {
     exitCode,
     durationMs,
-    lastAssistantText,
-    resultEvent,
-    toolUseCount,
+    lastAssistantText: state.lastAssistantText,
+    resultEvent: state.resultEvent,
+    toolUseCount: state.toolUseCount,
     abortedForTimeout,
   };
+}
+
+const TAIL_POLL_MS = 200;
+
+async function runClaudeInTmux(
+  opts: ClaudeRunOpts,
+  args: string[],
+  session: string
+): Promise<ClaudeRunResult> {
+  const absTranscript = resolve(opts.transcriptPath);
+  const exitPath = `${absTranscript}.exit`;
+  const promptPath = `${absTranscript}.prompt`;
+
+  // Clear any leftover artifacts from a prior run with the same path.
+  for (const p of [absTranscript, exitPath]) {
+    if (existsSync(p)) unlinkSync(p);
+  }
+  // Touch transcript so the tail loop can open it immediately.
+  writeFileSync(absTranscript, '');
+  writeFileSync(promptPath, opts.prompt);
+
+  // Window name from `<issueDir>-<phaseN>` so each run gets a distinct window.
+  const issueDir = basename(dirname(dirname(absTranscript)));
+  const file = basename(absTranscript, '.jsonl');
+  const window = sanitizeWindowName(`${issueDir}-${file}`);
+  const viewerScript = resolve(join(import.meta.dir, '..', 'lib', 'viewer.ts'));
+
+  // Build the claude argv with the prompt sourced from the temp file at run
+  // time. argv[2] in the harness's `args` array is the prompt body — replace
+  // it with a shell substitution so we never quote the entire prompt inline.
+  const claudeArgv = args
+    .map((a, i) =>
+      i === 2 ? `"$PROMPT"` : i === 0 ? a : shellQuote(a)
+    )
+    .join(' ');
+
+  const script = [
+    `set -u`,
+    `cd ${shellQuote(opts.cwd)}`,
+    `PROMPT="$(cat ${shellQuote(promptPath)})"`,
+    // Run claude detached, tee its output to the transcript so the viewer can
+    // render it. `${claudeArgv}` writes stream-json to stdout; tee fans it
+    // into the file. Capture exit via the pipefail trick.
+    `(`,
+    `  set -o pipefail`,
+    `  ${claudeArgv} 2>>${shellQuote(`${absTranscript}.stderr`)} | tee -a ${shellQuote(absTranscript)} >/dev/null`,
+    `  echo "$?" > ${shellQuote(exitPath)}`,
+    `) &`,
+    `claude_pid=$!`,
+    // Foreground: the prettified viewer is what the user sees when attached.
+    // It exits when killed; we kill it once claude finishes so the window can
+    // print a final banner before idling for keypress.
+    `bun ${shellQuote(viewerScript)} ${shellQuote(absTranscript)} &`,
+    `viewer_pid=$!`,
+    `wait "$claude_pid"`,
+    `kill "$viewer_pid" 2>/dev/null || true`,
+    `ec="$(cat ${shellQuote(exitPath)} 2>/dev/null || echo unknown)"`,
+    `printf '\\n[claude exited %s — press any key to close]' "$ec"`,
+    `read _`,
+  ].join('\n');
+
+  logSpawn(opts.log, args, opts.cwd, 'tmux');
+  opts.log.info('claude.tmux-window', {
+    session,
+    window,
+    transcript: absTranscript,
+  });
+
+  const startedAt = Date.now();
+  await openWindow({ session, window, command: `bash -c ${shellQuote(script)}` });
+
+  const tailResult = await tailTranscriptForExit({
+    transcriptPath: absTranscript,
+    exitPath,
+    session,
+    window,
+    log: opts.log,
+    signal: opts.signal,
+  });
+
+  const durationMs = Date.now() - startedAt;
+  const abortedForTimeout = opts.signal?.aborted ?? false;
+
+  // Append captured stderr to the transcript for debugging parity with the
+  // direct path. Best-effort; missing file is fine.
+  const stderrPath = `${absTranscript}.stderr`;
+  if (existsSync(stderrPath)) {
+    const stderr = readFileSync(stderrPath, 'utf8');
+    if (stderr.trim().length > 0) {
+      appendFileSync(absTranscript, `--- stderr ---\n${stderr}\n`);
+    }
+    try {
+      unlinkSync(stderrPath);
+    } catch {
+      // best-effort cleanup
+    }
+  }
+  try {
+    unlinkSync(promptPath);
+  } catch {
+    // best-effort cleanup
+  }
+
+  opts.log.info('claude.exit', {
+    exitCode: tailResult.exitCode,
+    durationMs,
+    toolUseCount: tailResult.state.toolUseCount,
+    abortedForTimeout,
+  });
+
+  return {
+    exitCode: tailResult.exitCode,
+    durationMs,
+    lastAssistantText: tailResult.state.lastAssistantText,
+    resultEvent: tailResult.state.resultEvent,
+    toolUseCount: tailResult.state.toolUseCount,
+    abortedForTimeout,
+  };
+}
+
+async function tailTranscriptForExit(args: {
+  transcriptPath: string;
+  exitPath: string;
+  session: string;
+  window: string;
+  log: Logger;
+  signal?: AbortSignal;
+}): Promise<{ exitCode: number; state: StreamState }> {
+  const state: StreamState = {
+    lastAssistantText: '',
+    resultEvent: null,
+    toolUseCount: 0,
+  };
+  let pos = 0;
+  let buf = '';
+
+  const drainNew = async (): Promise<void> => {
+    let size: number;
+    try {
+      size = statSync(args.transcriptPath).size;
+    } catch {
+      return;
+    }
+    if (size <= pos) return;
+    const fh = await open(args.transcriptPath, 'r');
+    try {
+      const chunk = Buffer.alloc(size - pos);
+      await fh.read(chunk, 0, chunk.length, pos);
+      buf += chunk.toString('utf8');
+      pos = size;
+    } finally {
+      await fh.close();
+    }
+    let nl = buf.indexOf('\n');
+    while (nl !== -1) {
+      processLine(buf.slice(0, nl), state, args.log);
+      buf = buf.slice(nl + 1);
+      nl = buf.indexOf('\n');
+    }
+  };
+
+  let aborted = false;
+  const onAbort = (): void => {
+    aborted = true;
+  };
+  args.signal?.addEventListener('abort', onAbort);
+
+  try {
+    for (;;) {
+      await drainNew();
+      if (existsSync(args.exitPath)) {
+        await drainNew();
+        const raw = readFileSync(args.exitPath, 'utf8').trim();
+        const exitCode = /^\d+$/.test(raw) ? Number(raw) : 1;
+        return { exitCode, state };
+      }
+      if (aborted) {
+        // Tear down the tmux window so the abandoned claude process stops.
+        await run(['tmux', 'kill-window', '-t', `${args.session}:${args.window}`]);
+        await drainNew();
+        return { exitCode: 130, state };
+      }
+      await new Promise<void>((res) => setTimeout(res, TAIL_POLL_MS));
+    }
+  } finally {
+    args.signal?.removeEventListener('abort', onAbort);
+  }
 }
 
 export function extractFencedJson<T>(

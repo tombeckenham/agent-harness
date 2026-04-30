@@ -315,7 +315,7 @@ export async function ghPrChecks(pr: number, repo: Repo): Promise<CiCheck[]> {
     '--repo',
     `${repo.owner}/${repo.name}`,
     '--json',
-    'name,status,conclusion',
+    'name,bucket,state',
   ]);
   // gh exits 8 when checks are pending or have failed; output is still JSON.
   // gh exits 1 on a freshly-created PR before any check has been registered
@@ -329,14 +329,39 @@ export async function ghPrChecks(pr: number, repo: Repo): Promise<CiCheck[]> {
       `gh pr checks failed (exit ${exitCode}): ${stderr.trim() || stdout.trim()}`
     );
   }
-  return ciCheckArraySchema.parse(JSON.parse(stdout || '[]'));
+  const raw = ghCheckArraySchema.parse(JSON.parse(stdout || '[]'));
+  return raw.map(toCiCheck);
 }
 
-const ciCheckArraySchema = z.array(
+// gh CLI emits `bucket` (pass|fail|pending|skipping|cancel) and `state`
+// (SUCCESS|FAILURE|IN_PROGRESS|...). Translate into the legacy
+// `status`/`conclusion` pair so downstream code stays oblivious.
+function toCiCheck(raw: { name: string; bucket: string; state: string }): CiCheck {
+  switch (raw.bucket) {
+    case 'pending':
+      return { name: raw.name, status: 'in_progress', conclusion: null };
+    case 'pass':
+      return { name: raw.name, status: 'completed', conclusion: 'success' };
+    case 'fail':
+      return { name: raw.name, status: 'completed', conclusion: 'failure' };
+    case 'skipping':
+      return { name: raw.name, status: 'completed', conclusion: 'skipped' };
+    case 'cancel':
+      return { name: raw.name, status: 'completed', conclusion: 'cancelled' };
+    default:
+      return {
+        name: raw.name,
+        status: 'completed',
+        conclusion: raw.state.toLowerCase(),
+      };
+  }
+}
+
+const ghCheckArraySchema = z.array(
   z.object({
     name: z.string(),
-    status: z.string(),
-    conclusion: z.string().nullable(),
+    bucket: z.string(),
+    state: z.string(),
   })
 );
 
