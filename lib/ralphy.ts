@@ -163,20 +163,31 @@ async function describeReviewFeedback(pr: number, repo: Repo): Promise<string> {
   const { reviews, comments } = await ghPrComments(pr, repo);
   const blockingReviews = reviews.filter(
     (r) =>
-      r.state === 'CHANGES_REQUESTED' ||
-      (r.state === 'COMMENTED' && r.body.trim().length > 0)
+      !isBotAuthor(r.author) &&
+      (r.state === 'CHANGES_REQUESTED' ||
+        (r.state === 'COMMENTED' && r.body.trim().length > 0))
   );
-  if (blockingReviews.length === 0 && comments.length === 0) {
+  const humanComments = comments.filter(
+    (c) => !isBotAuthor(c.author) && c.body.trim().length > 0
+  );
+  if (blockingReviews.length === 0 && humanComments.length === 0) {
     return '_No review comments yet._';
   }
   const reviewLines = blockingReviews.map(
     (r) =>
       `### Review by @${r.author} (${r.state}, ${r.submittedAt})\n${r.body}`
   );
-  const commentLines = comments
-    .filter((c) => c.body.trim().length > 0)
-    .map((c) => `### Comment by @${c.author} (${c.createdAt})\n${c.body}`);
+  const commentLines = humanComments.map(
+    (c) => `### Comment by @${c.author} (${c.createdAt})\n${c.body}`
+  );
   return [...reviewLines, ...commentLines].join('\n\n');
+}
+
+function isBotAuthor(author: string): boolean {
+  // GitHub Apps post as "<name>[bot]". Treat those as automated noise
+  // (Cloudflare preview, github-actions, dependabot, etc.) so the harness
+  // doesn't mistake their comments for blocking review feedback.
+  return author.endsWith('[bot]');
 }
 
 export async function runEngineerStep(args: {
