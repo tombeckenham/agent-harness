@@ -289,17 +289,26 @@ async function main(): Promise<void> {
     if (!(await tmuxAvailable())) {
       throw new Error('--tmux requested but `tmux -V` failed. Install tmux.');
     }
-    // On macOS, tmux panes cannot read the Keychain that stores Claude's
-    // OAuth credentials. Without an env-based token, claude in the pane
-    // exits with "Not logged in". Surface this up front instead of letting
-    // every Claude run fail mysteriously.
+    // On macOS, tmux's server daemon runs in a different OS session than
+    // your login shell, so Keychain entries (where Claude stores its OAuth
+    // token) aren't readable from inside a pane. Without one of these
+    // workarounds, claude exits with "Not logged in":
+    //   1. Drop --tmux (direct mode uses Bun.spawn → keeps your session).
+    //   2. Install `reattach-to-user-namespace` and set
+    //      `default-command "reattach-to-user-namespace -l $SHELL"` in tmux.
+    //   3. Export an env credential (CLAUDE_CODE_OAUTH_TOKEN /
+    //      ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN) — the harness forwards
+    //      env into the tmux session for you.
+    // We can't reliably detect (2), so just warn — don't block.
     const hasEnvAuth =
       typeof process.env.CLAUDE_CODE_OAUTH_TOKEN === 'string' ||
       typeof process.env.ANTHROPIC_API_KEY === 'string' ||
       typeof process.env.ANTHROPIC_AUTH_TOKEN === 'string';
     if (!hasEnvAuth && process.platform === 'darwin') {
-      throw new Error(
-        '--tmux on macOS requires an env-based credential. Run `claude setup-token` and export `CLAUDE_CODE_OAUTH_TOKEN`, or set `ANTHROPIC_API_KEY`. Tmux panes cannot read the Keychain.'
+      console.log(
+        '⚠ --tmux on macOS without an env credential — if claude exits with "Not logged in",\n' +
+          '  drop --tmux (direct mode), install `reattach-to-user-namespace` in tmux config,\n' +
+          '  or `claude setup-token` then export CLAUDE_CODE_OAUTH_TOKEN.\n'
       );
     }
     const session = `harness-${state.runId}`;
