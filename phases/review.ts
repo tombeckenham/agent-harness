@@ -23,6 +23,10 @@ const ALLOWED_TOOLS = [
   'Grep',
   'Glob',
   'TodoWrite',
+  // Required by the pr-review-toolkit workflow: spawns
+  // pr-review-toolkit:code-reviewer / silent-failure-hunter /
+  // pr-test-analyzer / comment-analyzer / type-design-analyzer in parallel.
+  'Task',
 ];
 
 const DISALLOWED_TOOLS = [

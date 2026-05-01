@@ -50,7 +50,7 @@ const STATE_FILE = join(STATE_DIR, 'state.json');
 
 function parseArgs(argv: string[]): Args {
   const issues: number[] = [];
-  let maxRounds = 3;
+  let maxRounds = 5;
   let onFailure: FailureMode = 'stop';
   let dryRun = false;
   let resume = false;
@@ -116,7 +116,7 @@ Usage:
 Options:
   --issues 504,505,506   Ordered list of issue numbers (required unless --resume)
   --resume               Resume the run recorded in .claude-harness/state.json
-  --max-rounds N         Max review/fix rounds per PR (default: 3)
+  --max-rounds N         Max review/fix rounds per PR (default: 5)
   --on-failure MODE      stop | skip | prompt (default: stop)
   --base REF             Base ref for the first issue's branch (default: main)
   --dry-run              Print the chain plan without spawning Claude
