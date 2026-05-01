@@ -162,6 +162,15 @@ async function runIssue(
       continue;
     }
 
+    // PR is open, branch has commits, but CI is still running. Block on CI
+    // here instead of spawning the engineer just to read "still running"
+    // and report `continue` — that's what was burning rounds.
+    if (issue.prNumber !== undefined && issueIsWaitingForCi(snapshot)) {
+      log.info('ralphy.await-ci', { pr: issue.prNumber });
+      await awaitCiSettled(issue.prNumber, args.repo, working, log);
+      continue;
+    }
+
     const stepResult = await runEngineerStep({
       issue,
       repo: args.repo,
@@ -255,6 +264,22 @@ function issueLooksReadyForReview(snapshot: {
   const noFeedback = /No review comments yet/.test(snapshot.reviewState);
   const hasCommits = !/No commits yet/.test(snapshot.branchState);
   return ciGreen && noFeedback && hasCommits;
+}
+
+function issueIsWaitingForCi(snapshot: {
+  branchState: string;
+  ciState: string;
+  reviewState: string;
+}): boolean {
+  const ciPending =
+    /still running/.test(snapshot.ciState) ||
+    /No checks reported yet/.test(snapshot.ciState) ||
+    /Polling timed out/.test(snapshot.ciState);
+  const hasCommits = !/No commits yet/.test(snapshot.branchState);
+  // Don't block on CI when the reviewer has already left feedback — the
+  // engineer should address it without waiting for green.
+  const noFeedback = /No review comments yet/.test(snapshot.reviewState);
+  return ciPending && hasCommits && noFeedback;
 }
 
 async function awaitCiSettled(
