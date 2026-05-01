@@ -289,6 +289,19 @@ async function main(): Promise<void> {
     if (!(await tmuxAvailable())) {
       throw new Error('--tmux requested but `tmux -V` failed. Install tmux.');
     }
+    // On macOS, tmux panes cannot read the Keychain that stores Claude's
+    // OAuth credentials. Without an env-based token, claude in the pane
+    // exits with "Not logged in". Surface this up front instead of letting
+    // every Claude run fail mysteriously.
+    const hasEnvAuth =
+      typeof process.env.CLAUDE_CODE_OAUTH_TOKEN === 'string' ||
+      typeof process.env.ANTHROPIC_API_KEY === 'string' ||
+      typeof process.env.ANTHROPIC_AUTH_TOKEN === 'string';
+    if (!hasEnvAuth && process.platform === 'darwin') {
+      throw new Error(
+        '--tmux on macOS requires an env-based credential. Run `claude setup-token` and export `CLAUDE_CODE_OAUTH_TOKEN`, or set `ANTHROPIC_API_KEY`. Tmux panes cannot read the Keychain.'
+      );
+    }
     const session = `harness-${state.runId}`;
     await ensureSession(session);
     process.env.HARNESS_TMUX_SESSION = session;
