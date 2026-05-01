@@ -1,7 +1,9 @@
-import { existsSync } from 'node:fs';
+import { existsSync, mkdirSync } from 'node:fs';
+import { dirname } from 'node:path';
 import { addWorktree, adoptWorktree, ensureSafeAbort } from './git';
 import type { Logger } from './log';
 import type { IssueState } from './state';
+import { setupWorktree } from './worktree-setup';
 
 export async function prepareIssueWorktree(args: {
   issue: IssueState;
@@ -16,6 +18,7 @@ export async function prepareIssueWorktree(args: {
       base: issue.baseRef,
       branch: issue.branch,
     });
+    mkdirSync(dirname(issue.worktreePath), { recursive: true });
     try {
       await addWorktree(
         issue.worktreePath,
@@ -23,7 +26,6 @@ export async function prepareIssueWorktree(args: {
         issue.baseRef,
         repoRoot
       );
-      return;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       if (!msg.includes('already exists')) throw err;
@@ -32,8 +34,14 @@ export async function prepareIssueWorktree(args: {
         branch: issue.branch,
       });
       await adoptWorktree(issue.worktreePath, issue.branch, repoRoot);
-      return;
     }
+    // Mirror dotfiles `_worktree_setup`: copy .env.local, local.db, run install.
+    await setupWorktree({
+      worktreePath: issue.worktreePath,
+      repoRoot,
+      log,
+    });
+    return;
   }
 
   log.info('worktree.exists', { path: issue.worktreePath });

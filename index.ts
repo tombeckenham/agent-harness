@@ -25,6 +25,7 @@ import {
 import { createLogger } from './lib/log';
 import { runChain } from './runner';
 import { ensureSession, tmuxAvailable } from './lib/tmux';
+import { worktreePathForIssue } from './lib/worktree-setup';
 import {
   DEFAULT_BUDGETS,
   loadState,
@@ -155,7 +156,7 @@ async function buildChainState(args: {
     const meta = await ghIssueView(n, args.repo);
     const slug = slugify(meta.title);
     const branch = `${String(n)}-${slug}`;
-    const worktreePath = join(args.runDir, 'worktrees', `issue-${String(n)}`);
+    const worktreePath = worktreePathForIssue(args.cwd, n);
     chain.push({
       issue: n,
       title: meta.title,
