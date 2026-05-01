@@ -238,7 +238,24 @@ async function main(): Promise<void> {
         `--resume specified but no state at ${statePath}. Run without --resume first.`
       );
     }
-    console.log(`Resuming run ${state.runId} (${state.chain.length} issues)`);
+    // Failed issues are reset to pending with rounds=0. Otherwise resume sees
+    // `rounds === maxRounds` and short-circuits straight to "max rounds
+    // exhausted" without ever spawning the engineer.
+    let resetCount = 0;
+    for (const issue of state.chain) {
+      if (issue.status === 'failed') {
+        issue.status = 'pending';
+        issue.rounds = 0;
+        delete issue.lastError;
+        resetCount++;
+      }
+    }
+    if (resetCount > 0) {
+      saveState(statePath, state);
+    }
+    console.log(
+      `Resuming run ${state.runId} (${state.chain.length} issues${resetCount > 0 ? `, reset ${resetCount} failed` : ''})`
+    );
   } else {
     if (existsSync(statePath)) {
       throw new Error(
