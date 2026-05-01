@@ -19,7 +19,13 @@ export type ClaudeRunOpts = {
   transcriptPath: string;
   allowedTools?: string[];
   disallowedTools?: string[];
-  permissionMode?: 'default' | 'acceptEdits' | 'plan' | 'bypassPermissions';
+  permissionMode?:
+    | 'default'
+    | 'acceptEdits'
+    | 'plan'
+    | 'auto'
+    | 'dontAsk'
+    | 'bypassPermissions';
   model?: string;
   signal?: AbortSignal;
   log: Logger;
@@ -136,7 +142,7 @@ function buildClaudeArgs(opts: ClaudeRunOpts): string[] {
     'stream-json',
     '--verbose',
     '--permission-mode',
-    opts.permissionMode ?? 'acceptEdits',
+    opts.permissionMode ?? 'auto',
   ];
   if (opts.allowedTools?.length) {
     args.push('--allowedTools', opts.allowedTools.join(','));
