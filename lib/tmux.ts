@@ -10,14 +10,38 @@ async function hasSession(session: string): Promise<boolean> {
   return exitCode === 0;
 }
 
+/**
+ * Build `-e KEY=VAL` flags for every env var in process.env so the tmux
+ * window inherits the harness's environment instead of whatever the tmux
+ * server happened to be started with. Without this, Claude inside tmux
+ * can't see the user's `ANTHROPIC_*` / `CLAUDE_CODE_OAUTH_TOKEN` and
+ * exits with "Not logged in".
+ */
+function envFlags(): string[] {
+  const out: string[] = [];
+  for (const [key, value] of Object.entries(process.env)) {
+    if (typeof value !== 'string') continue;
+    // tmux rejects keys with `=` in them and values containing NUL bytes.
+    if (key.length === 0 || key.includes('=') || value.includes('\0')) continue;
+    out.push('-e', `${key}=${value}`);
+  }
+  return out;
+}
+
 export async function ensureSession(session: string): Promise<void> {
-  if (await hasSession(session)) return;
+  if (await hasSession(session)) {
+    // Existing tmux server may have a stale env; push the current process env
+    // onto the session so subsequent windows inherit auth tokens etc.
+    await pushEnvToSession(session);
+    return;
+  }
   // Create a detached session with a placeholder window. The placeholder is
   // immediately renamed and other windows replace it as runs start.
   const { exitCode, stderr } = await run([
     'tmux',
     'new-session',
     '-d',
+    ...envFlags(),
     '-s',
     session,
     '-n',
@@ -28,6 +52,14 @@ export async function ensureSession(session: string): Promise<void> {
   ]);
   if (exitCode !== 0) {
     throw new Error(`tmux new-session failed: ${stderr.trim()}`);
+  }
+}
+
+async function pushEnvToSession(session: string): Promise<void> {
+  for (const [key, value] of Object.entries(process.env)) {
+    if (typeof value !== 'string') continue;
+    if (key.length === 0 || key.includes('=') || value.includes('\0')) continue;
+    await run(['tmux', 'set-environment', '-t', session, key, value]);
   }
 }
 
@@ -50,6 +82,7 @@ export async function openWindow(args: {
     'tmux',
     'new-window',
     '-d',
+    ...envFlags(),
     '-t',
     args.session,
     '-n',

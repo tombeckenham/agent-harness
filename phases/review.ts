@@ -144,12 +144,13 @@ export async function runReviewPhase(args: {
       abortedForTimeout: result.abortedForTimeout,
       exitCode: result.exitCode,
     });
-    // Per prompt contract: treat unparseable failures as clean to avoid
-    // pinning the chain on reviewer flakes.
+    // Reviewer process itself crashed (auth issue, missing binary, etc.) —
+    // mark needs_changes so the issue isn't silently merged. A timeout is
+    // also pessimistic by default; the user can re-run if they trust the PR.
     return {
-      verdict: 'clean',
+      verdict: 'needs_changes',
       blockingCount: 0,
-      summary: 'Reviewer phase failed; treated as clean.',
+      summary: `Reviewer process failed (exit ${String(result.exitCode)}${result.abortedForTimeout ? ', timed out' : ''}).`,
       transcriptPath,
     };
   }
