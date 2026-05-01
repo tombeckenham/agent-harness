@@ -102,7 +102,7 @@ export async function runReviewPhase(args: {
       transcriptPath,
       allowedTools: ALLOWED_TOOLS,
       disallowedTools: DISALLOWED_TOOLS,
-      permissionMode: 'default',
+      permissionMode: 'bypassPermissions',
       signal: ctrl.signal,
       log: phaseLog,
     });

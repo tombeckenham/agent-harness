@@ -239,7 +239,7 @@ export async function runEngineerStep(args: {
       transcriptPath,
       allowedTools: ALLOWED_TOOLS,
       disallowedTools: DISALLOWED_TOOLS,
-      permissionMode: 'acceptEdits',
+      permissionMode: 'bypassPermissions',
       signal: ctrl.signal,
       log: phaseLog,
     });
