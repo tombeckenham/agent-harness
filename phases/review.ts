@@ -1,12 +1,7 @@
-import { existsSync, mkdirSync, rmSync } from 'node:fs';
+import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { extractFencedJson, isReviewVerdict, runClaude } from '../lib/claude';
-import {
-  addWorktree,
-  adoptWorktree,
-  removeWorktree,
-  type Repo,
-} from '../lib/git';
+import { type Repo } from '../lib/git';
 import type { Logger } from '../lib/log';
 import { buildReviewPrompt } from '../lib/prompt';
 import type { IssueState } from '../lib/state';
@@ -62,44 +57,17 @@ export async function runReviewPhase(args: {
   budgetMs: number;
   log: Logger;
 }): Promise<ReviewVerdict> {
-  const { issue, repo, repoRoot, runDir, round, maxRounds, budgetMs, log } =
-    args;
+  const { issue, repo, round, maxRounds, budgetMs, log } = args;
   const phaseLog = log.child({ phase: 'review', issue: issue.issue });
   const transcriptPath = join(
-    runDir,
+    args.runDir,
     `issue-${issue.issue}`,
     'transcripts',
     `review-${round}.jsonl`
   );
-  mkdirSync(join(runDir, `issue-${issue.issue}`, 'transcripts'), {
+  mkdirSync(join(args.runDir, `issue-${issue.issue}`, 'transcripts'), {
     recursive: true,
   });
-
-  // Reviewer runs in a separate read-only worktree at the PR head so it
-  // physically cannot modify the implementing worktree.
-  const reviewWorktree = join(
-    runDir,
-    `issue-${issue.issue}`,
-    `review-${round}-worktree`
-  );
-  if (existsSync(reviewWorktree)) {
-    rmSync(reviewWorktree, { recursive: true, force: true });
-  }
-
-  // Adopt the existing branch into a fresh worktree.
-  try {
-    await adoptWorktree(reviewWorktree, issue.branch, repoRoot);
-  } catch (err) {
-    // If something stale is checked out elsewhere, try a clean add.
-    const msg = err instanceof Error ? err.message : String(err);
-    phaseLog.warn('review.worktree.adopt-failed', { msg });
-    await addWorktree(
-      reviewWorktree,
-      `${issue.branch}-rev-${round}`,
-      issue.branch,
-      repoRoot
-    );
-  }
 
   if (issue.prNumber === undefined) {
     throw new Error(
@@ -107,6 +75,10 @@ export async function runReviewPhase(args: {
     );
   }
 
+  // Reviewer runs in the engineer's worktree. Tool restrictions
+  // (DISALLOWED_TOOLS) prevent it from editing files, committing, or pushing
+  // — git only allows one worktree per branch, so the previous "separate
+  // review worktree" pattern was perpetually fighting that constraint.
   const prompt = buildReviewPrompt({
     repo: `${repo.owner}/${repo.name}`,
     pr: issue.prNumber,
@@ -114,7 +86,7 @@ export async function runReviewPhase(args: {
     baseRef: issue.baseRef,
     issue: issue.issue,
     title: issue.title,
-    cwd: reviewWorktree,
+    cwd: issue.worktreePath,
     round,
     maxRounds,
   });
@@ -126,7 +98,7 @@ export async function runReviewPhase(args: {
   try {
     result = await runClaude({
       prompt,
-      cwd: reviewWorktree,
+      cwd: issue.worktreePath,
       transcriptPath,
       allowedTools: ALLOWED_TOOLS,
       disallowedTools: DISALLOWED_TOOLS,
@@ -136,7 +108,6 @@ export async function runReviewPhase(args: {
     });
   } finally {
     clearTimeout(timer);
-    await removeWorktree(reviewWorktree, repoRoot);
   }
 
   if (result.abortedForTimeout || result.exitCode !== 0) {
