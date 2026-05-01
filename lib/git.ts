@@ -371,60 +371,77 @@ export async function ghPrComments(
 ): Promise<{
   reviews: Array<{
     author: string;
+    isBot: boolean;
     state: string;
     body: string;
     submittedAt: string;
   }>;
-  comments: Array<{ author: string; body: string; createdAt: string }>;
+  comments: Array<{
+    author: string;
+    isBot: boolean;
+    body: string;
+    createdAt: string;
+  }>;
 }> {
-  const { stdout, stderr, exitCode } = await runGhWithRetry([
-    'gh',
-    'pr',
-    'view',
-    String(pr),
-    '--repo',
-    `${repo.owner}/${repo.name}`,
-    '--json',
-    'reviews,comments',
+  // Use the REST API directly so we get `user.type` ("Bot" vs "User"). gh's
+  // own `--json comments,reviews` strips `[bot]` from logins and doesn't
+  // expose the type, which left us unable to distinguish CI bot noise from
+  // human review feedback.
+  const repoSlug = `${repo.owner}/${repo.name}`;
+  const [commentsRes, reviewsRes] = await Promise.all([
+    runGhWithRetry(['gh', 'api', `/repos/${repoSlug}/issues/${String(pr)}/comments`]),
+    runGhWithRetry(['gh', 'api', `/repos/${repoSlug}/pulls/${String(pr)}/reviews`]),
   ]);
-  if (exitCode !== 0) {
+  if (commentsRes.exitCode !== 0) {
     throw new Error(
-      `gh pr view failed (exit ${exitCode}): ${stderr.trim() || stdout.trim()}`
+      `gh api comments failed (exit ${commentsRes.exitCode}): ${commentsRes.stderr.trim() || commentsRes.stdout.trim()}`
     );
   }
-  const data = prCommentsSchema.parse(JSON.parse(stdout));
+  if (reviewsRes.exitCode !== 0) {
+    throw new Error(
+      `gh api reviews failed (exit ${reviewsRes.exitCode}): ${reviewsRes.stderr.trim() || reviewsRes.stdout.trim()}`
+    );
+  }
+  const rawComments = prRestCommentArraySchema.parse(JSON.parse(commentsRes.stdout));
+  const rawReviews = prRestReviewArraySchema.parse(JSON.parse(reviewsRes.stdout));
   return {
-    reviews: data.reviews.map((r) => ({
-      author: r.author.login,
+    reviews: rawReviews.map((r) => ({
+      author: r.user.login,
+      isBot: r.user.type === 'Bot',
       state: r.state,
       body: r.body,
-      submittedAt: r.submittedAt,
+      submittedAt: r.submitted_at,
     })),
-    comments: data.comments.map((c) => ({
-      author: c.author.login,
+    comments: rawComments.map((c) => ({
+      author: c.user.login,
+      isBot: c.user.type === 'Bot',
       body: c.body,
-      createdAt: c.createdAt,
+      createdAt: c.created_at,
     })),
   };
 }
 
-const prCommentsSchema = z.object({
-  reviews: z.array(
-    z.object({
-      author: z.object({ login: z.string() }),
-      state: z.string(),
-      body: z.string(),
-      submittedAt: z.string(),
-    })
-  ),
-  comments: z.array(
-    z.object({
-      author: z.object({ login: z.string() }),
-      body: z.string(),
-      createdAt: z.string(),
-    })
-  ),
+const restUserSchema = z.object({
+  login: z.string(),
+  type: z.string(),
 });
+
+const prRestCommentArraySchema = z.array(
+  z.object({
+    user: restUserSchema,
+    body: z.string().nullable().transform((v) => v ?? ''),
+    created_at: z.string(),
+  })
+);
+
+const prRestReviewArraySchema = z.array(
+  z.object({
+    user: restUserSchema,
+    state: z.string(),
+    body: z.string().nullable().transform((v) => v ?? ''),
+    submitted_at: z.string().nullable().transform((v) => v ?? ''),
+  })
+);
 
 export async function ghPrAddLabel(
   pr: number,
