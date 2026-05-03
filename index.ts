@@ -11,7 +11,7 @@
  * See README.md for design.
  */
 
-import { existsSync, mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { claudeAvailable } from './lib/claude';
 import {
@@ -41,12 +41,28 @@ type Args = {
   onFailure: FailureMode;
   dryRun: boolean;
   resume: boolean;
+  resumeId?: string;
   baseRef: string;
   tmux: boolean;
 };
 
 const STATE_DIR = '.claude-harness';
-const STATE_FILE = join(STATE_DIR, 'state.json');
+
+function runsDir(repoRoot: string): string {
+  return join(repoRoot, STATE_DIR, 'runs');
+}
+
+function runStatePath(repoRoot: string, runId: string): string {
+  return join(runsDir(repoRoot), runId, 'state.json');
+}
+
+function listRunIds(repoRoot: string): string[] {
+  const dir = runsDir(repoRoot);
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir).filter((id) =>
+    existsSync(join(dir, id, 'state.json'))
+  );
+}
 
 function parseArgs(argv: string[]): Args {
   const issues: number[] = [];
@@ -54,6 +70,7 @@ function parseArgs(argv: string[]): Args {
   let onFailure: FailureMode = 'stop';
   let dryRun = false;
   let resume = false;
+  let resumeId: string | undefined;
   let baseRef = process.env.CLAUDE_HARNESS_DEFAULT_BASE ?? 'main';
   let tmux = false;
 
@@ -89,6 +106,11 @@ function parseArgs(argv: string[]): Args {
       dryRun = true;
     } else if (a === '--resume') {
       resume = true;
+      const next = argv[i + 1];
+      if (next && !next.startsWith('--')) {
+        resumeId = next;
+        i++;
+      }
     } else if (a === '--tmux') {
       tmux = true;
     } else if (a === '--help' || a === '-h') {
@@ -102,7 +124,7 @@ function parseArgs(argv: string[]): Args {
   if (!resume && issues.length === 0) {
     throw new Error('Provide --issues N,N,N or --resume');
   }
-  return { issues, maxRounds, onFailure, dryRun, resume, baseRef, tmux };
+  return { issues, maxRounds, onFailure, dryRun, resume, resumeId, baseRef, tmux };
 }
 
 function printHelp(): void {
@@ -115,7 +137,9 @@ Usage:
 
 Options:
   --issues 504,505,506   Ordered list of issue numbers (required unless --resume)
-  --resume               Resume the run recorded in .claude-harness/state.json
+  --resume [RUN_ID]      Resume an existing run. Omit RUN_ID if only one run
+                         exists under .claude-harness/runs/; otherwise pass
+                         the id printed when the run started.
   --max-rounds N         Max review/fix rounds per PR (default: 5)
   --on-failure MODE      stop | skip | prompt (default: stop)
   --base REF             Base ref for the first issue's branch (default: main)
@@ -228,14 +252,30 @@ async function main(): Promise<void> {
   const repo = await detectRepo(repoRoot);
   await fetchAll(repoRoot);
 
-  const statePath = join(repoRoot, STATE_FILE);
   let state: HarnessState | null = null;
+  let statePath: string;
 
   if (args.resume) {
+    let runId = args.resumeId;
+    if (!runId) {
+      const ids = listRunIds(repoRoot);
+      if (ids.length === 0) {
+        throw new Error(
+          `--resume specified but no runs under ${runsDir(repoRoot)}. Run without --resume first.`
+        );
+      }
+      if (ids.length > 1) {
+        throw new Error(
+          `--resume requires a RUN_ID when multiple runs exist:\n  ${ids.join('\n  ')}\nPass one as --resume <id>.`
+        );
+      }
+      runId = ids[0];
+    }
+    statePath = runStatePath(repoRoot, runId!);
     state = loadState(statePath);
     if (!state) {
       throw new Error(
-        `--resume specified but no state at ${statePath}. Run without --resume first.`
+        `No state file at ${statePath}. Available runs: ${listRunIds(repoRoot).join(', ') || '(none)'}`
       );
     }
     // Failed issues are reset to pending with rounds=0. Otherwise resume sees
@@ -257,14 +297,18 @@ async function main(): Promise<void> {
       `Resuming run ${state.runId} (${state.chain.length} issues${resetCount > 0 ? `, reset ${resetCount} failed` : ''})`
     );
   } else {
-    if (existsSync(statePath)) {
-      throw new Error(
-        `State already exists at ${statePath}. Pass --resume to continue, or remove it to start fresh.`
-      );
-    }
     const runId = makeRunId();
     const runDir = join(repoRoot, STATE_DIR, 'runs', runId);
+    if (existsSync(runDir)) {
+      throw new Error(`Run dir already exists: ${runDir}`);
+    }
     mkdirSync(runDir, { recursive: true });
+    statePath = runStatePath(repoRoot, runId);
+    console.log(
+      `\n=== Started run ${runId} ===\n` +
+        `  state:   ${statePath}\n` +
+        `  resume:  agent-harness --resume ${runId}\n`
+    );
     state = await buildChainState({
       issues: args.issues,
       repo,

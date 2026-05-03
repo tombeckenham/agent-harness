@@ -63,10 +63,12 @@ Stacked-PR mechanic: each PR's base is the previous PR's branch. Squash-merging 
 
 Everything lives under `.claude-harness/` in the repo where you ran the harness (gitignore it):
 
-- `state.json` — chain state, idempotent on `--resume`.
+- `runs/<runId>/state.json` — chain state for that run; pass `--resume <runId>` to continue.
 - `runs/<runId>/events.jsonl` — structured event log.
 - `runs/<runId>/issue-<N>/transcripts/{engineer-N,review-N}.jsonl` — full Claude stream-JSON transcripts for debugging.
 - `runs/<runId>/worktrees/issue-<N>/` — git worktree dedicated to the issue.
+
+Multiple runs can coexist — kick off a new harness on a different set of issues and it gets its own `runId`. (Worktrees are keyed per-issue, so don't run two concurrent harnesses on the same issue number.)
 
 ## Failure modes
 
