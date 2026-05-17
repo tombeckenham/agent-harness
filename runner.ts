@@ -77,8 +77,10 @@ export async function runChain(args: RunnerArgs): Promise<HarnessState> {
       continue;
     }
 
-    // Wire next issue's baseRef.
-    if (i + 1 < state.chain.length) {
+    // In stacked mode, the next issue's branch is cut from this one's branch.
+    // In independent mode, baseRef was already set to args.baseRef at chain
+    // construction — leave it alone.
+    if (state.config.stack && i + 1 < state.chain.length) {
       const next = at(state.chain, i + 1);
       const updated = { ...next, baseRef: at(state.chain, i).branch };
       state = persistAt(state, args.statePath, i + 1, updated);
@@ -131,7 +133,8 @@ async function runIssue(
 
   const issueDeadline = Date.now() + working.config.budgets.issueHardCapMs;
   const prevPrSummary = buildPrevPrSummary(
-    index > 0 ? at(working.chain, index - 1) : undefined
+    index > 0 ? at(working.chain, index - 1) : undefined,
+    working.config.stack
   );
 
   while (issue.rounds < working.config.maxRounds) {
@@ -213,7 +216,8 @@ async function runIssue(
           issue,
           args.repo,
           log,
-          stepResult.verdict?.summary ?? ''
+          stepResult.verdict?.summary ?? '',
+          working.config.stack && index > 0
         );
         update({ ...issue, prNumber: pr });
         issue = at(working.chain, index);
@@ -364,14 +368,15 @@ async function openPr(
   issue: IssueState,
   repo: Repo,
   log: Logger,
-  summary: string
+  summary: string,
+  stacked: boolean
 ): Promise<number> {
   const meta = await ghIssueView(issue.issue, repo);
   const title = formatPrTitle(meta.title, issue.issue);
   const body = formatPrBody({
     issue: issue.issue,
     summary,
-    isStacked: issue.baseRef !== 'main',
+    isStacked: stacked,
     baseRef: issue.baseRef,
   });
   const commits = await commitsSince(issue.baseRef, issue.worktreePath);

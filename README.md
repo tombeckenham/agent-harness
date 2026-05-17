@@ -1,16 +1,21 @@
 # agent-harness
 
-Overnight runner for chains of dependent GitHub issues. Spawns Claude Code to drive each issue from "no work done" to "PR is merge-ready" via stacked PRs, gating on CI and an independent reviewer pass.
+Overnight runner for batches of GitHub issues. Spawns Claude Code to drive each issue from "no work done" to "PR is merge-ready", gating on CI and an independent reviewer pass.
+
+By default, each issue is independent and based on `main` (or `--base`). For dependent issues that need stacked PRs, pass `--stack`.
 
 Built on the [Ralph Wiggum](https://ghuntley.com/ralph/) loop pattern: per issue, the harness runs a single tight loop where Claude reads the world (branch state, PR status, CI checks, unaddressed review comments) each iteration and decides what to do next — implement, fix CI, address review feedback, or declare done. State lives in git/GitHub, not in a 12-state machine.
 
 ## Usage
 
 ```bash
-# Run a chain of dependent issues
+# Run a batch of independent issues (each off main)
 bunx github:tombeckenham/agent-harness --issues 504,505,506
 
-# Preview the chain plan without spawning Claude
+# Run a chain of dependent issues as stacked PRs
+bunx github:tombeckenham/agent-harness --issues 504,505,506 --stack
+
+# Preview the plan without spawning Claude
 bunx github:tombeckenham/agent-harness --issues 504,505,506 --dry-run
 
 # Resume a crashed run
@@ -44,9 +49,9 @@ Run from the root of any GitHub repo with these tools installed:
 
 ## How it works
 
-For each issue in the chain:
+For each issue in the run:
 
-1. **Prepare branch.** Creates `<issue>-<slug>` in a dedicated git worktree off the previous PR's branch (or `main` for the first).
+1. **Prepare branch.** Creates `<issue>-<slug>` in a dedicated git worktree. With `--stack`, the branch is cut from the previous PR's branch (first issue uses `--base`). Without `--stack` (default), every branch is cut from `--base`.
 2. **Engineer loop (ralphy).** Up to `--max-rounds` iterations of:
    - **Snapshot** the world: commits since base, PR existence, CI status, unaddressed review comments.
    - **Engineer step.** Spawn one Claude session with the unified `engineer.md` prompt and the snapshot. The agent reads it and decides what to do (implement, fix CI, address review). Commits land on the worktree branch.
@@ -55,9 +60,11 @@ For each issue in the chain:
 3. **Reviewer pass** (separate Claude in clean read-only worktree at the PR head): runs the `/review` skill, posts a consolidated review, emits a `clean`/`needs_changes` verdict.
    - `clean` → issue is `done`.
    - `needs_changes` → next engineer iteration sees the new comments in its snapshot and addresses them.
-4. **Done.** Sets the next issue's `baseRef` to this PR's branch and continues the chain.
+4. **Done.** Moves to the next issue. With `--stack`, the next issue's `baseRef` is set to this PR's branch.
 
-Stacked-PR mechanic: each PR's base is the previous PR's branch. Squash-merging the parent (with "delete branch on merge" enabled) auto-retargets the child to `main`.
+Stacked-PR mechanic (when `--stack`): each PR's base is the previous PR's branch. Squash-merging the parent (with "delete branch on merge" enabled) auto-retargets the child to `main`.
+
+Independent mode (default): each issue's branch is cut from `--base` at creation time. If `main` advances mid-run, branches don't auto-rebase — the engineer agent handles any resulting merge conflicts when it next pushes. Fine for unrelated work; pass `--stack` if the issues actually depend on each other.
 
 ## State
 

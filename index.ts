@@ -44,6 +44,7 @@ type Args = {
   resumeId?: string;
   baseRef: string;
   tmux: boolean;
+  stack: boolean;
 };
 
 const STATE_DIR = '.claude-harness';
@@ -73,6 +74,7 @@ function parseArgs(argv: string[]): Args {
   let resumeId: string | undefined;
   let baseRef = process.env.CLAUDE_HARNESS_DEFAULT_BASE ?? 'main';
   let tmux = false;
+  let stack = false;
 
   const requireValue = (flag: string, idx: number): string => {
     if (idx >= argv.length) {
@@ -113,6 +115,8 @@ function parseArgs(argv: string[]): Args {
       }
     } else if (a === '--tmux') {
       tmux = true;
+    } else if (a === '--stack') {
+      stack = true;
     } else if (a === '--help' || a === '-h') {
       printHelp();
       process.exit(0);
@@ -124,7 +128,7 @@ function parseArgs(argv: string[]): Args {
   if (!resume && issues.length === 0) {
     throw new Error('Provide --issues N,N,N or --resume');
   }
-  return { issues, maxRounds, onFailure, dryRun, resume, resumeId, baseRef, tmux };
+  return { issues, maxRounds, onFailure, dryRun, resume, resumeId, baseRef, tmux, stack };
 }
 
 function printHelp(): void {
@@ -142,7 +146,12 @@ Options:
                          the id printed when the run started.
   --max-rounds N         Max review/fix rounds per PR (default: 5)
   --on-failure MODE      stop | skip | prompt (default: stop)
-  --base REF             Base ref for the first issue's branch (default: main)
+  --base REF             Base ref each issue's branch is cut from (default: main).
+                         When --stack is set, only the first issue uses this;
+                         later issues stack on the previous PR's branch.
+  --stack                Stack PRs: each issue's branch is based on the previous
+                         issue's branch. Default: each issue is independent off
+                         --base (run unrelated work in one invocation).
   --dry-run              Print the chain plan without spawning Claude
   --tmux                 Open a tmux session with one window per Claude run.
                          Attach from another terminal: tmux attach -t harness-<runId>
@@ -171,6 +180,7 @@ async function buildChainState(args: {
   baseRef: string;
   maxRounds: number;
   onFailure: FailureMode;
+  stack: boolean;
   runId: string;
   runDir: string;
   cwd: string;
@@ -186,18 +196,21 @@ async function buildChainState(args: {
       title: meta.title,
       slug,
       branch,
-      baseRef: i === 0 ? args.baseRef : '__placeholder__',
+      // In stacked mode the placeholder is rewritten below; in independent
+      // mode every issue is cut from args.baseRef.
+      baseRef: !args.stack || i === 0 ? args.baseRef : '__placeholder__',
       worktreePath,
       status: 'pending',
       rounds: 0,
       reviewRounds: 0,
     });
   }
-  // Wire up baseRefs in a second pass so each points at the prior branch.
-  for (let i = 1; i < chain.length; i++) {
-    const cur = chain[i];
-    const prev = chain[i - 1];
-    if (cur && prev) cur.baseRef = prev.branch;
+  if (args.stack) {
+    for (let i = 1; i < chain.length; i++) {
+      const cur = chain[i];
+      const prev = chain[i - 1];
+      if (cur && prev) cur.baseRef = prev.branch;
+    }
   }
   return {
     runId: args.runId,
@@ -205,6 +218,7 @@ async function buildChainState(args: {
     config: {
       maxRounds: args.maxRounds,
       onFailure: args.onFailure,
+      stack: args.stack,
       budgets: { ...DEFAULT_BUDGETS },
     },
     chain,
@@ -229,6 +243,7 @@ function summarizePlan(state: HarnessState): string {
   const lines: string[] = [
     `Run ID: ${state.runId}`,
     `Issues: ${state.chain.length}`,
+    `Mode: ${state.config.stack ? 'stacked' : 'independent (each off base)'}`,
     `Max rounds: ${state.config.maxRounds}`,
     `On failure: ${state.config.onFailure}`,
     '',
@@ -315,6 +330,7 @@ async function main(): Promise<void> {
       baseRef: args.baseRef,
       maxRounds: args.maxRounds,
       onFailure: args.onFailure,
+      stack: args.stack,
       runId,
       runDir,
       cwd: repoRoot,

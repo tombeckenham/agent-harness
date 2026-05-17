@@ -73,11 +73,14 @@ Opened by the agent-harness overnight runner. See the \`harness-active\` label.
 `;
 }
 
-// Used as a fallback when the harness wants to mention the previous PR in the
-// chain as context for the engineer prompt.
+// Context for the engineer prompt's "Previous PR in chain" slot. Only
+// meaningful when issues are stacked — otherwise there's no chain dependency
+// to describe.
 export function buildPrevPrSummary(
-  prev: import('./state').IssueState | undefined
+  prev: import('./state').IssueState | undefined,
+  stacked: boolean
 ): string {
+  if (!stacked) return 'N/A — this issue is independent (not stacked).';
   if (!prev) return 'None — first PR in chain.';
   const prLine =
     prev.prNumber === undefined

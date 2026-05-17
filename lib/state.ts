@@ -35,6 +35,7 @@ export type HarnessState = {
   config: {
     maxRounds: number;
     onFailure: FailureMode;
+    stack: boolean;
     budgets: {
       engineerMs: number;
       ciMs: number;
@@ -57,7 +58,12 @@ export function loadState(path: string): HarnessState | null {
   // Trusted file written by saveState in a prior run. Skip schema validation
   // to keep the file forward-compatible across small additions to IssueState.
   // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- harness-owned state file
-  return JSON.parse(readFileSync(path, 'utf-8')) as HarnessState;
+  const parsed = JSON.parse(readFileSync(path, 'utf-8')) as HarnessState;
+  // Pre-flag runs were always stacked; preserve that on resume.
+  if (typeof parsed.config.stack !== 'boolean') {
+    parsed.config.stack = true;
+  }
+  return parsed;
 }
 
 export function saveState(path: string, state: HarnessState): void {
